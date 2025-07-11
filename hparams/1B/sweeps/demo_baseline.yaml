@@ -1,0 +1,55 @@
+name: demo_sweep
+project:  ccloco
+method: grid
+program: train.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8
+  - ${program} 
+  - ${args_no_boolean_flags}
+
+parameters:
+  # Run configuration
+  strategy:
+    value: demo_baseline
+  run_name:
+    value: demo_baseline
+
+  # Data configuration
+  shards_path:
+    value: $DATA_DIR/dclm_10B_tokenized
+  token_budget:
+    value: 9940500480 # [effective_bs=2**22 * iterations=2370]
+  sequence_length:
+    value: 2048
+
+  # Model configuration
+  hparams_file:
+    value: hparams/1B/1B_model_hparams.json
+  use_compile:
+    value: True
+
+  # Training configuration
+  micro_batch_size:
+    value: 8 # -1 to set micro_batch_size to batch_size
+  batch_size:
+    values: 
+    - 256
+  outer_learning_rate:
+    values:
+    - 8e-4
+    - 4e-4
+    - 1e-3
+  weight_decay:
+    value: 0.1
+  warmup_steps:
+    value: 500
+
+  # Compression configuration
+  error_decay:
+    value: 0.999
+  top_k:
+    value: 32
+  chunk_size:
+    value: 64
