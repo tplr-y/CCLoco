@@ -201,6 +201,7 @@ class DistributedLLMTrainer:
                 "diloco_baseline",
                 "demo_baseline",
                 "demo_diloco",
+                "topkloco",
                 "ccloco",
                 "custom",
             ],
@@ -393,6 +394,25 @@ class DistributedLLMTrainer:
             config.outer_optimizer = "ccloco"
             config.use_dct = False
             config.outer_use_sign = False
+        elif config.strategy == "topkloco":
+            tplr.logger.info(
+                f"[Strat] Hardcoding inner optimizer to 'adamw' and outer optimizers to 'ccloco' but chunking is practically eliminated."
+            )
+            config.inner_optimizer = "adamw"
+            config.outer_optimizer = "ccloco"
+            config.use_dct = False
+            config.outer_use_sign = False
+
+            # Find chunk size and topk values for classic topk
+            hparams_file = os.path.expandvars(os.path.expanduser(config.hparams_file))
+            with open(hparams_file, "r") as fp:
+                hparams = json.load(fp)
+            hidden_size = hparams.get("hidden_size")
+            chunk_topk = config.top_k
+            chunk_size = config.chunk_size
+
+            config.top_k = int(chunk_topk * (hidden_size ** 2) / (chunk_size ** 2))
+            config.chunk_size = hidden_size
         else:
             if config.strategy != "custom":
                 tplr.logger.warning(
@@ -1035,7 +1055,7 @@ class DistributedLLMTrainer:
         """Save model checkpoint."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(
-            self.config.save_path, f"demo_checkpoint_window_{window}_{timestamp}.pt"
+            self.config.save_path, f"checkpoint_window_{window}_{timestamp}.pt"
         )
 
         if isinstance(self.model, DDP):
