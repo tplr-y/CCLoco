@@ -29,6 +29,10 @@ from transformers import (
     LlamaForCausalLM,
 )
 
+# Import Muon optimizer not yet part of PyTorch, see
+#   https://github.com/pytorch/pytorch/issues/148819
+from muon import SingleDeviceMuonWithAuxAdam
+
 # Local
 import tplr
 
@@ -202,6 +206,7 @@ class DistributedLLMTrainer:
                 "demo_baseline",
                 "demo_diloco",
                 "ccloco",
+                "ccloco_muon",
                 "custom",
             ],
             help="Training strategy to use",
@@ -210,7 +215,7 @@ class DistributedLLMTrainer:
             "--inner_optimizer",
             type=str,
             default=None,
-            choices=["adamw"],
+            choices=["adamw", "muon"],
             help="inner optimizer to use. None means simple gradient accumulation",
         )
         parser.add_argument(
@@ -233,6 +238,24 @@ class DistributedLLMTrainer:
             type=float,
             default=6e-4,
             help="Learning rate for inner optimizer",
+        )
+        parser.add_argument(
+            "--muon_head_lr_scale",
+            type=float,
+            default=0.5,
+            help="Learning rate scaling factor for head parameters when using Muon (default: 0.5)",
+        )
+        parser.add_argument(
+            "--muon_embed_lr_scale",
+            type=float,
+            default=0.5,
+            help="Learning rate scaling factor for embedding parameters when using Muon (default: 0.5)",
+        )
+        parser.add_argument(
+            "--muon_scalar_lr_scale",
+            type=float,
+            default=0.2,
+            help="Learning rate scaling factor for scalar parameters when using Muon (default: 0.2)",
         )
 
         ## Outer optimizer
@@ -396,6 +419,14 @@ class DistributedLLMTrainer:
                 f"[Strat] Hardcoding inner optimizer to 'adamw' and outer optimizers to 'ccloco'."
             )
             config.inner_optimizer = "adamw"
+            config.outer_optimizer = "ccloco"
+            config.use_dct = False
+            config.outer_use_sign = False
+        elif config.strategy == "ccloco_muon":
+            tplr.logger.info(
+                f"[Strat] Hardcoding inner optimizer to 'muon' and outer optimizers to 'ccloco'."
+            )
+            config.inner_optimizer = "muon"
             config.outer_optimizer = "ccloco"
             config.use_dct = False
             config.outer_use_sign = False
@@ -694,6 +725,60 @@ class DistributedLLMTrainer:
                     tplr.logger.info(
                         f"Using AdamW as inner optimizer with lr={self.config.inner_learning_rate} and weight_decay={self.config.weight_decay}"
                     )
+            elif self.config.inner_optimizer.lower() == "muon":
+                # Separate parameters for Muon (2D matrices) and Adam (embeddings, scalars)
+                hidden_2d_params = []
+                embed_params = []
+                scalar_params = []
+                head_params = []
+                
+                for name, param in self.model.named_parameters():
+                    if param.ndim >= 2 and "embed" not in name and "lm_head" not in name:
+                        hidden_2d_params.append(param)
+                    elif "embed" in name:
+                        embed_params.append(param)
+                    elif "lm_head" in name:
+                        head_params.append(param)
+                    else:
+                        scalar_params.append(param)
+                
+                if not embed_params:
+                    tplr.logger.exception("The embedding layer must contain the word 'embed' so we can isolate it from Muon")
+                
+                # Create parameter groups for SingleDeviceMuonWithAuxAdam
+                adam_groups = []
+                if head_params:
+                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate * self.config.muon_head_lr_scale))
+                if embed_params:
+                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate * self.config.muon_embed_lr_scale))
+                if scalar_params:
+                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate * self.config.muon_scalar_lr_scale))
+                
+                adam_groups = [dict(**g, betas=(0.9, 0.95), eps=1e-8, use_muon=False) for g in adam_groups]
+                
+                # Ensure we have at least some parameters for Muon
+                if not hidden_2d_params:
+                    tplr.logger.warning("No hidden 2-dim parameters found for Muon optimizer.")
+                
+                muon_group = dict(
+                    params=hidden_2d_params, 
+                    lr=self.config.inner_learning_rate,
+                    momentum=0.95,
+                    weight_decay=self.config.weight_decay,
+                    use_muon=True
+                )
+                
+                param_groups = adam_groups + [muon_group]
+                self.inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
+                
+                if self.global_rank == 0:
+                    tplr.logger.info(
+                        f"Using Muon as inner optimizer with lr={self.config.inner_learning_rate} and weight_decay={self.config.weight_decay}"
+                    )
+                    tplr.logger.info(f"  - Hidden matrix params: {len(hidden_2d_params)}")
+                    tplr.logger.info(f"  - Embedding params: {len(embed_params)} (lr scale: {self.config.muon_embed_lr_scale})")
+                    tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (lr scale: {self.config.muon_scalar_lr_scale})")
+                    tplr.logger.info(f"  - Head params: {len(head_params)} (lr scale: {self.config.muon_head_lr_scale})")
             else:
                 raise NotImplementedError(
                     f"Unknown inner optimizer: {self.config.inner_optimizer}"
@@ -949,6 +1034,10 @@ class DistributedLLMTrainer:
                 )
 
                 # Log gradient metrics
+                params_without_grad = sum(1 for p in self.model.parameters() if p.grad is None)
+                if params_without_grad > 0:
+                    tplr.logger.warning(f"Found {params_without_grad} parameters without gradients")
+                
                 grad_norms = [
                     p.grad.norm().item()
                     for p in self.model.parameters()

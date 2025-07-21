@@ -62,6 +62,14 @@ Then, run any of the predefined experiments using the corresponding sweep file. 
 bash ./run_sweep.sh hparams/1B/sweeps/ccloco.yaml
 ```
 
+### CCLoco + MuonWithAuxAdam Inner Optimizer
+
+The [Muon optimizer](https://github.com/KellerJordan/Muon/tree/master) will be used for local optimization steps within each data-parallel group, while CCLoco handles the global aggregation.
+
+```bash
+bash ./run_sweep.sh hparams/1B/sweeps/ccloco.yaml
+```
+
 ### Baselines
 
 **DiLoCo Baseline**: Baseline DiLoCo with Nesterov outer optimizer
