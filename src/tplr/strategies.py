@@ -101,6 +101,7 @@ class Diloco(InnerOuterStrategy):
         self.tokenizer = tokenizer
         self.config = config
         self.params_offloaded = None
+        self.compressive_optimizer = self.config.outer_optimizer in ["ccloco", "demo"]
 
     def inner_step(self, model, loader, inner_optimizer, inner_scheduler):
         total_loss, batch_tokens, batch_count = 0, 0, 0
@@ -175,6 +176,10 @@ class Diloco(InnerOuterStrategy):
         ):
             saved_param = param_offloaded.to(param.device)
             param.grad = saved_param - param.data
+
+            if self.world_size > 1 and not self.compressive_optimizer:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+
             param.data.copy_(saved_param)
 
         optimizer.step()
