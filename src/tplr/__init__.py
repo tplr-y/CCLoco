@@ -1,3 +1,5 @@
+__version__ = "0.2.2"
+
 # Import package.
 from .ccloco import CCLoco
 from .data import ShardedGPUDataset, get_dataloader

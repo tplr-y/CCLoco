@@ -1,4 +1,5 @@
 # Standard library
+import math
 import gc
 import glob
 import os
@@ -16,8 +17,8 @@ import tplr
 
 class ShardedGPUDataset(Dataset):
     """
-    Memory-efficient dataset that loads tokenized data from .npy shards using memmap.
-    Each DDP worker pre-loads its assigned data portion to RAM or GPU memory.
+    A PyTorch Dataset that efficiently loads tokenized data from .npy shards,
+    distributing tokens among DDP workers without excessive memory usage.
     """
 
     def __init__(
@@ -28,104 +29,127 @@ class ShardedGPUDataset(Dataset):
         rank: int,
         world_size: int,
         device: torch.device,
+        shard_token_size: int = 1024**3, # Expected tokens per .npy shard
         split: Literal["train", "validation"] = "train",
-        pin_to_gpu: bool = False,
-        shard_dtype: str = "uint16",
+        pin_to_gpu: bool = False
     ):
         """
         Args:
-            shards_path: Directory containing .npy shard files
-            token_budget: Total tokens to load across all workers
-            sequence_length: Length of each training sequence
-            rank: Current worker rank
-            world_size: Total number of workers
-            device: Target device for data
-            split: Data split to use ("train" or "validation")
-            pin_to_gpu: Whether to keep data on GPU memory
-            shard_dtype: NumPy dtype of tokens in shards (must match shard creation)
+            shards_path (str): Path to the directory containing .npy token shards.
+            token_budget (int): Total number of tokens to be used across all workers.
+            sequence_length (int): The length of each sequence to be returned.
+            rank (int): The rank of the current DDP process.
+            world_size (int): The total number of DDP processes.
+            device (torch.device): The CUDA device for this rank (e.g., torch.device("cuda:0")).
+            shard_token_size (int): Expected number of tokens in each .npy shard file.
+                                    Used to calculate how many shards to load for the budget.
+            split (str): Train test split to load data ("train" or "validation").
         """
         super().__init__()
-
+        
+        # Validate split parameter
         if split not in ["train", "validation"]:
-            raise ValueError(
-                f"Invalid split '{split}'. Must be 'train' or 'validation'."
-            )
-
+            raise ValueError(f"Invalid split '{split}'. Must be either 'train' or 'validation'.")
+        
         self.shards_path = Path(shards_path)
+        self.token_budget = token_budget
         self.sequence_length = sequence_length
-        self.pin_to_gpu = pin_to_gpu
+        self.rank = rank
+        self.world_size = world_size
+        self.device = device
+        self.pin_to_gpu = pin_to_gpu 
+        self.shard_token_size = shard_token_size
+        self.shard_filename_prefix = f"{split}_"
 
         if not self.shards_path.is_dir():
             raise FileNotFoundError(f"Shards directory not found: {self.shards_path}")
 
-        # Discover shard files and set up data type
-        shard_prefix = f"{split}_"
-        shard_files = sorted(glob.glob(str(self.shards_path / f"{shard_prefix}*.npy")))
+        # 1. Discover and sort shard files
+        shard_files = sorted(glob.glob(str(self.shards_path / f"{self.shard_filename_prefix}*.npy")))
         if not shard_files:
-            raise FileNotFoundError(
-                f"No shard files with prefix '{shard_prefix}' in {self.shards_path}"
-            )
+            raise FileNotFoundError(f"No shard files found with prefix '{self.shard_filename_prefix}' in {self.shards_path}")
 
-        dtype = np.dtype(shard_dtype)
-        itemsize = dtype.itemsize
+        # 2. Calculate how many shards to load
+        tplr.logger.info(f"self.token_budget: {self.token_budget}, self.shard_token_size: {self.shard_token_size}")
+        num_shards_to_load = math.ceil(self.token_budget / self.shard_token_size)
+        
+        if num_shards_to_load > len(shard_files):
+            tplr.logger.warning(f"[Rank {self.rank}]: Requested to load {num_shards_to_load} shards, but only {len(shard_files)} are available. Using all available shards.")
+            num_shards_to_load = len(shard_files)
 
-        # Calculate worker's token slice
-        tokens_per_worker = token_budget // world_size
-        worker_start = rank * tokens_per_worker
-        worker_end = (rank + 1) * tokens_per_worker
-        if rank == world_size - 1:
-            worker_end = token_budget
+        # 3. Load shards incrementally and extract worker's portion
+        tplr.logger.info(f"[Rank {self.rank}] Loading {num_shards_to_load} shards incrementally...")
+        
+        worker_token_chunks = []
+        total_tokens_processed = 0
+        tokens_per_worker = self.token_budget // self.world_size
+        worker_start_token = self.rank * tokens_per_worker
+        worker_end_token = (self.rank + 1) * tokens_per_worker
+        
+        # Ensure last worker gets any remaining tokens
+        if self.rank == self.world_size - 1:
+            worker_end_token = self.token_budget
 
-        # Load worker's data segments using memmap
-        tplr.logger.info(f"[Rank {rank}] Calculating data segments to load...")
-        chunks, tokens_seen = [], 0
-
-        for shard_file in shard_files:
-            if tokens_seen >= token_budget:
+        for i in range(num_shards_to_load):
+            if total_tokens_processed >= self.token_budget:
                 break
-
+                
+            shard_file_path = shard_files[i]
+            
             try:
-                num_tokens_in_shard = os.path.getsize(shard_file) // itemsize
-                shard_start_global = tokens_seen
-                shard_end_global = min(tokens_seen + num_tokens_in_shard, token_budget)
-
-                if shard_end_global > worker_start and shard_start_global < worker_end:
-                    shard_mmap = np.memmap(shard_file, dtype=dtype, mode="r")
-                    local_start = max(0, worker_start - shard_start_global)
-                    local_end = min(len(shard_mmap), worker_end - shard_start_global)
-
+                # Load shard data
+                shard_data_np = np.load(shard_file_path).astype(np.int32)
+                shard_tokens = len(shard_data_np)
+                
+                # Calculate which part of this shard belongs to current worker
+                shard_start_global = total_tokens_processed
+                shard_end_global = min(total_tokens_processed + shard_tokens, self.token_budget)
+                
+                # Check if this shard overlaps with current worker's range
+                if shard_end_global > worker_start_token and shard_start_global < worker_end_token:
+                    # Calculate local indices within the shard
+                    local_start = max(0, worker_start_token - shard_start_global)
+                    local_end = min(shard_tokens, worker_end_token - shard_start_global)
+                    
                     if local_start < local_end:
-                        segment = shard_mmap[local_start:local_end]
-                        # Copy to free mmap handle and convert to torch.long for embeddings
-                        chunks.append(torch.from_numpy(segment.copy()).long())
-
-                    del shard_mmap
-                tokens_seen = shard_end_global
-
+                        # Extract worker's portion from this shard
+                        worker_portion = shard_data_np[local_start:local_end]
+                        worker_token_chunks.append(torch.tensor(worker_portion, dtype=torch.long))
+                        
+                        tplr.logger.debug(f"[Rank {self.rank}] Shard {i}: extracted tokens {local_start}:{local_end} "
+                                        f"(global {shard_start_global + local_start}:{shard_start_global + local_end})")
+                
+                total_tokens_processed = shard_end_global
+                
+                # Clean up numpy array immediately
+                del shard_data_np
+                
             except Exception as e:
-                raise IOError(f"Error processing shard file {shard_file}: {e}")
+                raise IOError(f"Error loading shard file {shard_file_path}: {e}")
 
-        if not chunks:
-            raise ValueError(
-                f"[Rank {rank}] No tokens loaded. Check token budget and worker assignment."
-            )
+        # 4. Concatenate worker's token chunks
+        if not worker_token_chunks:
+            raise ValueError(f"[Rank {self.rank}] No tokens loaded for this worker. Check token budget and worker assignment.")
 
-        # Consolidate and optionally move to GPU
-        worker_tokens = torch.cat(chunks)
-        del chunks
+        worker_tokens_cpu = torch.cat(worker_token_chunks, dim=0)
+        
+        # Clean up chunks
+        del worker_token_chunks
         gc.collect()
-
+        
+        # 5. Move to GPU if requested
         if self.pin_to_gpu:
-            self.worker_tokens = worker_tokens.to(device)
-            del worker_tokens
+            self.worker_tokens = worker_tokens_cpu.to(self.device)
+            del worker_tokens_cpu  # Free CPU memory
         else:
-            self.worker_tokens = worker_tokens
+            self.worker_tokens = worker_tokens_cpu
 
+        # Calculate number of full sequences (samples) for this worker
         self.num_samples = len(self.worker_tokens) // self.sequence_length
-        tplr.logger.info(
-            f"[Rank {rank}] Loaded {len(self.worker_tokens):,} tokens, "
-            f"creating {self.num_samples:,} samples of length {self.sequence_length}"
-        )
+        
+        actual_tokens = len(self.worker_tokens)
+        tplr.logger.info(f"[Rank {self.rank}] Loaded {actual_tokens:,} tokens, "
+                        f"creating {self.num_samples:,} samples of length {self.sequence_length}")
 
     def __len__(self):
         return self.num_samples

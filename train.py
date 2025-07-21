@@ -310,6 +310,12 @@ class DistributedLLMTrainer:
             default="uint16",
             help="NumPy dtype of tokens in shards (must match shard creation)",
         )
+        parser.add_argument(    
+            "--shard_token_size",
+            type=int,
+            default=1024**3,
+            help="Number of tokens in each shard (must match shard creation)",
+        )
         parser.add_argument(
             "--max_steps",
             type=int,
@@ -623,6 +629,7 @@ class DistributedLLMTrainer:
             split="train",
             pin_to_gpu=self.config.data_in_gpu,
             shard_dtype=self.config.shard_dtype,
+            shard_token_size=self.config.shard_token_size,
         )
 
         self.train_loader = tplr.get_dataloader(
@@ -718,7 +725,7 @@ class DistributedLLMTrainer:
                 lr=self.config.outer_learning_rate,
                 weight_decay=self.outer_weight_decay,
                 betas=(0.9, 0.95),
-                eps=0.1,
+                eps=0.1 if self.is_diloco else 1e-8
             )
         elif self.config.outer_optimizer.lower() == "nesterov":
             self.outer_optimizer = SGD(
