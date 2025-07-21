@@ -21,6 +21,8 @@ parameters:
     value: $DATA_DIR/dclm_tokenized
   token_budget:
     value: 10255073280 # [effective_bs=2**22 * H=15 * iterations=163]
+  shard_token_size:
+    value: 1073741824 # 1Gi
   sequence_length:
     value: 2048
 
@@ -38,15 +40,10 @@ parameters:
     - 256
   outer_learning_rate:
     values:
-    - 0.9
-    - 0.7
     - 0.5
   inner_learning_rate:
     values:
     - 8e-4
-    - 4e-4
-    - 6e-4
-    - 2e-4
   inner_steps:
     values:
     - 15

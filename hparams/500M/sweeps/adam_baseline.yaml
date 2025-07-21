@@ -18,9 +18,11 @@ parameters:
 
   # Data configuration
   shards_path:
-    value: $DATA_DIR/
+    value: $DATA_DIR/dclm_tokenized
   token_budget:
     value: 10255073280 # [effective_bs=2**22 * iterations=2445]
+  shard_token_size:
+    value: 1073741824 # 1Gi
   sequence_length:
     value: 2048
 
@@ -38,10 +40,10 @@ parameters:
     - 256
   outer_learning_rate:
     values:
-    - 4e-4
+    - 1e-3
+    - 3e-3
     - 8e-4
     - 6e-4
-    - 2e-4
   warmup_steps:
     value: 500
   weight_decay:

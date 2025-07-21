@@ -21,31 +21,29 @@ parameters:
     value: $DATA_DIR/dclm_tokenized
   token_budget:
     value: 10255073280 # [effective_bs=2**22 * H=15 * iterations=163]
+  shard_token_size:
+    value: 1073741824 # 1Gi
   sequence_length:
     value: 2048
 
   # Model configuration
   hparams_file:
     value: hparams/500M/500M_model_hparams.json
-  use_compile:
-    value: True
+  # use_compile:
+  #   value: True
 
   # Training configuration
   micro_batch_size:
-    value: 16 # -1 to set micro_batch_size to batch_size
+    value: 32 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
   outer_learning_rate:
     values:
-    - 0.9
-    - 0.7
-    - 0.5
+    - 1
   inner_learning_rate:
     values:
-    - 8e-4
-    - 6e-4
-    - 4e-4
+    - 1e-3
   inner_steps:
     values:
     - 15
@@ -56,7 +54,7 @@ parameters:
 
   # Compression configuration
   error_decay:
-    value: 0.999
+    value: 0.95
   top_k:
     value: 32
   chunk_size:
