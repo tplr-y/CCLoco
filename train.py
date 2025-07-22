@@ -327,12 +327,6 @@ class DistributedLLMTrainer:
             default="~/datasets/edu_fineweb_score2_10B_tokenized_llama2",
             help="Path to the dataset shards.",
         )
-        parser.add_argument(
-            "--shard_dtype",
-            type=str,
-            default="uint16",
-            help="NumPy dtype of tokens in shards (must match shard creation)",
-        )
         parser.add_argument(    
             "--shard_token_size",
             type=int,
@@ -659,7 +653,6 @@ class DistributedLLMTrainer:
             device=self.device,
             split="train",
             pin_to_gpu=self.config.data_in_gpu,
-            shard_dtype=self.config.shard_dtype,
             shard_token_size=self.config.shard_token_size,
         )
 
