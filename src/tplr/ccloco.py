@@ -215,14 +215,14 @@ class ChunkingTransform:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
             # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, jb, ld -> ...ikbd", x, b, d)
+            return torch.einsum("...ijkl, kb, ld -> ...ijbd", x, b, d)
 
     def einsum_2d_t(self, x, b, d=None):
         if d is None:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
             # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, kb, ld -> ...ibjd", x, b, d)
+            return torch.einsum("...ijbd, bk, dl -> ...ijkl", x, b, d)
 
     @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -230,7 +230,7 @@ class ChunkingTransform:
         if len(x.shape) > 1:  # 2D weights
             n1 = self.shape_dict[x.shape[0]]
             n2 = self.shape_dict[x.shape[1]]
-            x = rearrange(x, "(y h) (x w) -> y h x w", h=n1, w=n2)
+            x = rearrange(x, "(y h) (x w) -> y x h w", h=n1, w=n2)
             if not self.use_dct:
                 return x
 
@@ -264,9 +264,7 @@ class ChunkingTransform:
                 self.b_dict[n1] = n1w
                 self.b_dict[n2] = n2w
                 x = self.einsum_2d_t(x, n1w, n2w)
-
-            x = rearrange(x, "y h x w -> (y h) (x w)")
-
+            x = rearrange(x, "y x h w -> (y h) (x w)")
         else:  # 1D weights
             if self.use_dct:
                 n1 = x.shape[1]
@@ -305,7 +303,6 @@ class TopKCompressor:
             x_flat_chunks = rearrange(x, "x w -> x w")
 
         # Limit topk to max size
-        totalk = x_flat_chunks.shape[-1]
         k = self._clamp_topk(x_flat_chunks, k)
 
         _, idx = torch.topk(
