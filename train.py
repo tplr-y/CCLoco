@@ -270,6 +270,13 @@ class DistributedLLMTrainer:
             "--chunk_size", type=int, default=64, help="Chunk size for CCLoco optimizer"
         )
         parser.add_argument(
+            "--chunk_strat",
+            type=str,
+            default="square",
+            choices=["square", "each_row", "each_column"],
+            help="Chunking strategy for CCLoco optimizer",
+        )
+        parser.add_argument(
             "--use_dct",
             action="store_true",
             help="Use DCT transform in CCLoco optimizer",
@@ -374,6 +381,9 @@ class DistributedLLMTrainer:
             )
             config.inner_optimizer = None
             config.outer_optimizer = "demo"
+            config.chunk_strat = (
+                "square"  # DCT is used in demo, so chunking strategy must be square.
+            )
             config.use_dct = True
             config.outer_use_sign = True
         elif config.strategy == "demo_diloco":
@@ -382,6 +392,9 @@ class DistributedLLMTrainer:
             )
             config.inner_optimizer = "adamw"
             config.outer_optimizer = "demo"
+            config.chunk_strat = (
+                "square"  # DCT is used in demo, so chunking strategy must be square.
+            )
             config.use_dct = True
             config.outer_use_sign = (
                 False  # With use_sign=True, demo and diloco do not work together well.
@@ -411,7 +424,7 @@ class DistributedLLMTrainer:
             chunk_topk = config.top_k
             chunk_size = config.chunk_size
 
-            config.top_k = int(chunk_topk * (hidden_size ** 2) / (chunk_size ** 2))
+            config.top_k = int(chunk_topk * (hidden_size**2) / (chunk_size**2))
             config.chunk_size = hidden_size
         else:
             if config.strategy != "custom":
@@ -725,6 +738,7 @@ class DistributedLLMTrainer:
                 error_decay=self.config.error_decay,
                 top_k=self.config.top_k,
                 chunk_size=self.config.chunk_size,
+                chunk_strat=self.config.chunk_strat,
                 use_dct=self.config.use_dct,
                 use_sign=self.config.outer_use_sign,
                 use_quantization=self.config.use_quantization,
@@ -738,7 +752,7 @@ class DistributedLLMTrainer:
                 lr=self.config.outer_learning_rate,
                 weight_decay=self.outer_weight_decay,
                 betas=(0.9, 0.95),
-                eps=0.1 if self.is_diloco else 1e-8
+                eps=0.1 if self.is_diloco else 1e-8,
             )
         elif self.config.outer_optimizer.lower() == "nesterov":
             self.outer_optimizer = SGD(

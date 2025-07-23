@@ -17,7 +17,18 @@ Code adapted from: https://github.com/bloc97/DeMo
 
 # Standard library
 import math
-from typing import Optional, Callable, List, Tuple, Union, TypeAlias, Iterable, Any
+import logging
+from typing import (
+    Literal,
+    Optional,
+    Callable,
+    List,
+    Tuple,
+    Union,
+    TypeAlias,
+    Iterable,
+    Any,
+)
 
 # Third party
 import torch
@@ -178,16 +189,29 @@ class ChunkingTransform:
     """Handles tensor chunking, with an optional DCT transformation."""
 
     def __init__(
-        self, param_groups: ParamsT, chunk_size: int, use_dct: bool, norm: str = "ortho"
+        self,
+        param_groups: ParamsT,
+        chunk_size: int,
+        use_dct: bool,
+        chunk_strat: Literal["square", "each_row", "each_column"] = "square",
+        norm: str = "ortho",
     ):
         self.target_chunk = chunk_size
         self.use_dct = use_dct
+        self.chunk_strat = chunk_strat
+        self.decode_info: Optional[Tuple[str, torch.Size]] = None
         self.shape_dict = {}
         self.f_dict, self.b_dict = (
             {},
             {},
         )  #  Forward (DCT) and backward (IDCT) transform matrices
         self._initialize_transforms(param_groups, norm)
+
+        if self.use_dct and self.chunk_strat != "square":
+            raise ValueError(
+                "DCT is only designed for 'square' chunking. "
+                f"Ignoring for strategy '{self.chunk_strat}'."
+            )
 
     def _initialize_transforms(self, param_groups: ParamsT, norm: str):
         """Precomputes chunk shapes and, if enabled, DCT bases."""
@@ -226,36 +250,61 @@ class ChunkingTransform:
 
     @torch.no_grad()
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Chunks a tensor and optionally applies DCT."""
-        if len(x.shape) > 1:  # 2D weights
+        """Chunks a tensor based on the chosen strategy."""
+        self.decode_info = (self.chunk_strat, x.shape)
+
+        # 1D tensors are always chunked along their single dimension.
+        if len(x.shape) <= 1:
+            self.decode_info = ("1d", x.shape)
+            n1 = self.shape_dict[x.shape[0]]
+            x_chunked = rearrange(x, "(c s) -> c s", s=n1)
+            if not self.use_dct:
+                return x_chunked
+            n1w = self.f_dict[n1].to(x.device)
+            self.f_dict[n1] = n1w
+            return self.einsum_2d(x_chunked, n1w)
+
+        # 2D+ tensors are handled based on the strategy.
+        if self.chunk_strat == "square":
             n1 = self.shape_dict[x.shape[0]]
             n2 = self.shape_dict[x.shape[1]]
-            x = rearrange(x, "(y h) (x w) -> y x h w", h=n1, w=n2)
+            x_chunked = rearrange(x, "(y h) (x w) -> y x h w", h=n1, w=n2)
             if not self.use_dct:
-                return x
-
+                return x_chunked
             n1w = self.f_dict[n1].to(x.device)
             n2w = self.f_dict[n2].to(x.device)
             self.f_dict[n1] = n1w
             self.f_dict[n2] = n2w
-            x = self.einsum_2d(x, n1w, n2w)
+            return self.einsum_2d(x_chunked, n1w, n2w)
 
-        else:  # 1D weights
-            n1 = self.shape_dict[x.shape[0]]
-            x = rearrange(x, "(x w) -> x w", w=n1)
-            if not self.use_dct:
-                return x
+        elif self.chunk_strat == "each_row":
+            return x  # Each row is a chunk, no transformation needed.
 
-            n1w = self.f_dict[n1].to(x.device)
-            self.f_dict[n1] = n1w
-            x = self.einsum_2d(x, n1w)
+        elif self.chunk_strat == "each_column":
+            return (
+                x.T.contiguous()
+            )  # Transpose so each original column is now a row (chunk).
 
-        return x
+        else:
+            raise ValueError(f"Unknown chunking strategy: {self.chunk_strat}")
 
     @torch.no_grad()
     def decode(self, x: torch.Tensor) -> torch.Tensor:
-        """De-chunks a tensor and optionally applies inverse DCT."""
-        if len(x.shape) > 2:  # 2D weights
+        """De-chunks a tensor based on the strategy used for encoding."""
+        if self.decode_info is None:
+            raise RuntimeError("decode() called before encode()")
+
+        strategy, _ = self.decode_info
+
+        if strategy == "1d":
+            if self.use_dct:
+                n1 = x.shape[1]
+                n1w = self.b_dict[n1].to(x.device)
+                self.b_dict[n1] = n1w
+                x = self.einsum_2d_t(x, n1w)
+            return rearrange(x, "c s -> (c s)")
+
+        elif strategy == "square":
             if self.use_dct:
                 n1 = x.shape[2]
                 n2 = x.shape[3]
@@ -264,15 +313,16 @@ class ChunkingTransform:
                 self.b_dict[n1] = n1w
                 self.b_dict[n2] = n2w
                 x = self.einsum_2d_t(x, n1w, n2w)
-            x = rearrange(x, "y x h w -> (y h) (x w)")
-        else:  # 1D weights
-            if self.use_dct:
-                n1 = x.shape[1]
-                n1w = self.b_dict[n1].to(x.device)
-                self.b_dict[n1] = n1w
-                x = self.einsum_2d_t(x, n1w)
+            return rearrange(x, "y x h w -> (y h) (x w)")
 
-            x = rearrange(x, "x w -> (x w)")
+        elif strategy == "each_row":
+            return x  # No transformation was applied.
+
+        elif strategy == "each_column":
+            return x.T.contiguous()  # Inverse of transpose is transpose.
+
+        else:
+            raise RuntimeError(f"Invalid strategy '{strategy}' in decode state.")
 
         return x
 
@@ -439,6 +489,7 @@ class CCLoco(torch.optim.SGD):
         error_decay: float = 0.999,
         top_k: int = 32,
         chunk_size: int = 64,
+        chunk_strat: str = "square",
         momentum: float = 0.0,
         weight_decay: float = 0.0,
         use_dct: bool = False,
@@ -453,12 +504,16 @@ class CCLoco(torch.optim.SGD):
 
         self.error_decay = error_decay
         self.top_k = top_k
+        self.chunk_size = chunk_size
+        self.chunk_strat = chunk_strat
         self.decoupled_weight_decay = weight_decay
         self.use_dct = use_dct
         self.use_sign = use_sign
         self.process_group = process_group
 
-        self.transform = ChunkingTransform(self.param_groups, chunk_size, use_dct)
+        self.transform = ChunkingTransform(
+            self.param_groups, chunk_size, use_dct, chunk_strat
+        )
         self.compressor = TopKCompressor(
             use_quantization, quantization_bins, quantization_range
         )
@@ -508,8 +563,17 @@ class CCLoco(torch.optim.SGD):
 
                 # 3. Compress the error buffer to get the values to transmit.
                 tensor_to_compress = self.transform.encode(error_buffer)
+
+                # Adapt K to maintain compression ratio for non-square strategies
+                k = self.top_k
+                strategy, _ = self.transform.decode_info
+                if strategy in ["each_row", "each_column"]:
+                    chunk_len = tensor_to_compress.shape[-1]
+                    k_float = chunk_len * self.top_k / (self.chunk_size**2)
+                    k = int(max(1.0, round(k_float)))
+
                 indices, values, shape, local_quant_params = self.compressor.compress(
-                    tensor_to_compress, self.top_k
+                    tensor_to_compress, k
                 )
 
                 # 4. Reconstruct the local gradient to compute the error feedback.
@@ -530,7 +594,7 @@ class CCLoco(torch.optim.SGD):
                 gathered_values = self._all_gather_tensor(values)
 
                 # 6. Decompress and aggregate gradients from all workers.
-                if self.compressor.use_quantization:
+                if self.compressor.use_quantization and gathered_quant_params:
                     gathered_values = [
                         self.compressor._dequantize(v, qp)
                         for v, qp in zip(gathered_values, gathered_quant_params)

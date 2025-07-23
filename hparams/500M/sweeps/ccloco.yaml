@@ -1,4 +1,4 @@
-name: ccloco_sweep
+name: ccloco_sweep_chunking
 project:  ccloco500M
 method: grid
 program: train.py
@@ -34,7 +34,7 @@ parameters:
 
   # Training configuration
   micro_batch_size:
-    value: 32 # -1 to set micro_batch_size to batch_size
+    value: 16 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
@@ -48,7 +48,8 @@ parameters:
     values:
     - 15
   warmup_steps:
-    value: 500
+    values: 
+    - 500
   weight_decay:
     value: 0.1
 
@@ -56,12 +57,12 @@ parameters:
   error_decay:
     value: 0.95
   top_k:
-    value: 32
+    values: 
+    - 32
   chunk_size:
     value: 64
-  # quantization_bins:
-  #   value: 256
-  # quantization_range:
-  #   value: 6
-  # use_quantization:
-  #   value: True
+  chunk_strat:
+    values:
+    - square
+    - each_row
+    - each_column
