@@ -29,12 +29,12 @@ parameters:
   # Model configuration
   hparams_file:
     value: hparams/500M/500M_model_hparams.json
-  # use_compile:
-  #   value: True
+  use_compile:
+    value: True
 
   # Training configuration
   micro_batch_size:
-    value: 32 # -1 to set micro_batch_size to batch_size
+    value: 8 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
