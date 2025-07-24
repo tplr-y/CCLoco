@@ -34,7 +34,7 @@ parameters:
 
   # Training configuration
   micro_batch_size:
-    value: 8 # -1 to set micro_batch_size to batch_size
+    value: 16 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
@@ -49,13 +49,26 @@ parameters:
   muon_head_lr_scale:
     values:
     - 0.5  # Default
-    - 1.0  # Same as hidden layers
+    # - 1.0  # Same as hidden layers
   muon_embed_lr_scale:
     values:
     - 0.5  # Default
-    - 1.0  # Same as hidden layers
+    # - 1.0  # Same as hidden layers
   muon_scalar_lr_scale:
     value: 0.2  # Keep default for scalars
+  muon_scaling_mode:
+    values:
+    - muon
+    - moonlight
+    - hybrid
+    - adaptive
+  muon_rms_target:
+    values: 
+    - 0.2
+    - 0.3
+  muon_hybrid_threshold:
+    values:
+    - 4.0
   inner_steps:
     values:
     - 15
@@ -64,7 +77,6 @@ parameters:
   weight_decay:
     values: 
     - 0.01  # Muon uses lower weight decay
-    - 0.1
 
   # Compression configuration
   error_decay:
