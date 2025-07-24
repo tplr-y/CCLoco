@@ -14,7 +14,7 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon
+    value: ccloco_ada_muon
 
   # Data configuration
   shards_path:
