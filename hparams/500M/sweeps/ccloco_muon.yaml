@@ -8,6 +8,7 @@ command:
   - --nproc_per_node=8
   - ${program} 
   - ${args_no_boolean_flags}
+  - --track_muon_rms
 
 parameters:
   # Run configuration
