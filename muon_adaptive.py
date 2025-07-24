@@ -59,17 +59,19 @@ def compute_adaptive_scale(
     
     # Determine mode based on parameter name if layer patterns are configured
     mode = config.mode
+    # Override MuonScalingConfig.layer_patterns for muon mode
+    # and be consistent with Keller James Muon implementation
+    if mode == 'muon':
+        # Original Muon scaling: sqrt(fan_out/fan_in)
+        return math.sqrt(max(1, (m / n)))
+
     if param_name and config.layer_patterns:
         for pattern, layer_mode in config.layer_patterns.items():
             if pattern in param_name:
                 mode = layer_mode
                 break
-    
-    if mode == 'muon':
-        # Original Muon scaling: sqrt(fan_out/fan_in)
-        return max(1, math.sqrt(m / n))
         
-    elif mode == 'moonlight':
+    if mode == 'moonlight':
         # Moonlight scaling: fixed coefficient * sqrt(max_dim)
         return config.rms_target * math.sqrt(max(m, n))
         
