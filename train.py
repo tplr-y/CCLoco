@@ -242,44 +242,37 @@ class DistributedLLMTrainer:
             default=6e-4,
             help="Learning rate for inner optimizer",
         )
+        ## Muon-specific hyperparameters
         parser.add_argument(
-            "--muon_head_lr_scale",
+            "--muon_inner_learning_rate",
             type=float,
-            default=0.5,
-            help="Learning rate scaling factor for head parameters when using Muon (default: 0.5)",
+            default=0.02,
+            help="Learning rate specifically for Muon optimizer (default: 0.02)",
         )
         parser.add_argument(
-            "--muon_embed_lr_scale",
+            "--muon_momentum",
             type=float,
-            default=0.5,
-            help="Learning rate scaling factor for embedding parameters when using Muon (default: 0.5)",
+            default=0.95,
+            help="Momentum coefficient for Muon optimizer (default: 0.95)",
         )
         parser.add_argument(
-            "--muon_scalar_lr_scale",
+            "--muon_weight_decay",
             type=float,
-            default=0.2,
-            help="Learning rate scaling factor for scalar parameters when using Muon (default: 0.2)",
+            default=0.01,
+            help="Weight decay for Muon optimizer (default: 0.01)",
         )
-
-        ## Muon Args
         parser.add_argument(
             "--muon_scaling_mode",
             type=str,
             default="muon",
-            choices=["muon", "moonlight", "hybrid", "adaptive"],
-            help="Scaling mode for Muon optimizer"
+            choices=["muon", "moonlight"],
+            help="Scaling mode for Muon optimizer (only 'muon' and 'moonlight' supported)"
         )
         parser.add_argument(
             "--muon_rms_target",
             type=float,
             default=0.25,
-            help="Target RMS for moonlight/hybrid scaling modes"
-        )
-        parser.add_argument(
-            "--muon_hybrid_threshold",
-            type=float,
-            default=4.0,
-            help="Aspect ratio threshold for hybrid scaling mode"
+            help="Target RMS for moonlight scaling mode"
         )
         parser.add_argument(
             "--track_muon_rms",
@@ -760,6 +753,7 @@ class DistributedLLMTrainer:
                         continue
 
                     # we do this because the original muon impl doesn't use named_parameters
+                    # and we're doing layer specific RMS tracking
                     param_to_name[param] = name
 
                     if param.ndim < 2:
@@ -777,11 +771,11 @@ class DistributedLLMTrainer:
                 # Create parameter groups for SingleDeviceMuonWithAuxAdam
                 adam_groups = []
                 if head_params:
-                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate * self.config.muon_head_lr_scale))
+                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate))
                 if embed_params:
-                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate * self.config.muon_embed_lr_scale))
+                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate))
                 if scalar_params:
-                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate * self.config.muon_scalar_lr_scale))
+                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate))
                 
                 adam_groups = [dict(**g, betas=(0.9, 0.95), eps=1e-8, use_muon=False) for g in adam_groups]
                 
@@ -791,30 +785,40 @@ class DistributedLLMTrainer:
                 
                 muon_group = dict(
                     params=hidden_2d_params, 
-                    lr=self.config.inner_learning_rate,
-                    momentum=0.95,
-                    weight_decay=self.config.weight_decay,
+                    lr=self.config.muon_inner_learning_rate,
+                    momentum=self.config.muon_momentum,
+                    weight_decay=self.config.muon_weight_decay,
                     use_muon=True
                 )
                 
                 param_groups = adam_groups + [muon_group]
-                self.inner_optimizer = SingleDeviceMuonWithAuxAdamAdaptive(param_groups)
-                tplr.logger.info(f"\n\n\n\nNote: we are using muon_adaptive.py not KJ's official muon.py, make sure to validate identical runs, then delete this log message.\n\n\n\n")
+                
+                # Create MuonScalingConfig for the optimizer
+                from muon_adaptive import MuonScalingConfig
+                scaling_config = MuonScalingConfig(
+                    mode=self.config.muon_scaling_mode,
+                    rms_target=self.config.muon_rms_target,
+                    track_rms=self.config.track_muon_rms
+                )
+                
+                self.inner_optimizer = SingleDeviceMuonWithAuxAdamAdaptive(param_groups, scaling_config=scaling_config)
+
                 self.inner_optimizer.set_param_names(param_to_name)
                 
                 if self.global_rank == 0:
                     tplr.logger.info(
                         f"Using Muon as inner optimizer with muon_scaling_mode={self.config.muon_scaling_mode}, "\
-                        f"lr={self.config.inner_learning_rate} and weight_decay={self.config.weight_decay}"
+                        f"lr={self.config.muon_inner_learning_rate}, momentum={self.config.muon_momentum}, "\
+                        f"weight_decay={self.config.muon_weight_decay}"
                     )
-                    if self.config.muon_scaling_mode != 'muon':
+                    if self.config.muon_scaling_mode == 'moonlight':
                         tplr.logger.info(f"  - muon_rms_target: {self.config.muon_rms_target}")
-                        tplr.logger.info(f"  - muon_hybrid_threshold: {self.config.muon_hybrid_threshold}")
                     
-                    tplr.logger.info(f"  - Hidden matrix params: {len(hidden_2d_params)}")
-                    tplr.logger.info(f"  - Embedding params: {len(embed_params)} (lr scale: {self.config.muon_embed_lr_scale})")
-                    tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (lr scale: {self.config.muon_scalar_lr_scale})")
-                    tplr.logger.info(f"  - Head params: {len(head_params)} (lr scale: {self.config.muon_head_lr_scale})")
+                    tplr.logger.info(f"  - Hidden matrix params: {len(hidden_2d_params)} (Muon)")
+                    tplr.logger.info(f"  - Embedding params: {len(embed_params)} (Adam, lr={self.config.inner_learning_rate})")
+                    tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (Adam, lr={self.config.inner_learning_rate})")
+                    tplr.logger.info(f"  - Head params: {len(head_params)} (Adam, lr={self.config.inner_learning_rate})")
+                    tplr.logger.info(f"  - Track RMS: {self.config.track_muon_rms}")
             else:
                 raise NotImplementedError(
                     f"Unknown inner optimizer: {self.config.inner_optimizer}"

@@ -35,7 +35,7 @@ parameters:
 
   # Training configuration
   micro_batch_size:
-    value: 20 # -1 to set micro_batch_size to batch_size
+    value: 26 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
@@ -43,43 +43,36 @@ parameters:
     values:
     - 1
   inner_learning_rate:
+    value: 1e-3  # AdamW learning rate for embedding/head/scalar params
+  # Muon-specific hyperparameters
+  muon_inner_learning_rate:
     values:
-    # - 0.02 # Muon typically uses higher LR
-    - 1e-3 # for moonlight can re-use adam turned hparam
-    # from moonlight paper: "Muon can directly reuse the learning rate and weight decay tuned for AdamW."
-  # Muon-specific learning rate scaling
-  muon_head_lr_scale:
+    - 0.05
+    - 0.02  # Original Muon learning rate
+    - 0.001  # For testing moonlight claims
+  muon_momentum:
+    value: 0.95  # Muon momentum
+  muon_weight_decay:
     values:
-    # - 0.5  # Default
-    - 1.0
-  muon_embed_lr_scale:
-    values:
-    # - 0.5  # Default
-    - 1.0
-  muon_scalar_lr_scale:
-    # value: 0.2  # Keep default for scalars
-    value: 1.0
+    - 0.01  # Original Muon weight decay
+    - 0.1  # For testing moonlight claims
   muon_scaling_mode:
     values:
+    - muon
     - moonlight
-    - hybrid
-    - adaptive
   muon_rms_target:
     values: 
-    - 0.2
+    - 0.2  # For moonlight mode only
+    - 0.25
     - 0.3
-  muon_hybrid_threshold:
-    values:
-    - 4.0
   inner_steps:
     values:
     - 15
+    - 30
   warmup_steps:
     value: 500
   weight_decay:
-    values: 
-    # - 0.01  # Muon uses lower weight decay
-    - 0.1
+    value: 0.1  # AdamW weight decay for embedding/head/scalar params
 
   # Compression configuration
   error_decay:

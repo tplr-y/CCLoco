@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 import math
 from typing import Optional, Dict, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from muon import zeropower_via_newtonschulz5, adam_update
 
@@ -16,26 +16,13 @@ from muon import zeropower_via_newtonschulz5, adam_update
 @dataclass
 class MuonScalingConfig:
     """Configuration for Muon scaling strategies."""
-    mode: str = 'muon'  # 'muon', 'moonlight', 'hybrid', 'adaptive'
-    rms_target: float = 0.25  # Target RMS for moonlight mode
-    hybrid_threshold: float = 4.0  # Aspect ratio threshold for hybrid mode
-    # These map to LLaMa linear layer naming, see *_proj here:
-    # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
-    layer_patterns: Dict[str, str] = field(default_factory=lambda: {
-        'down_proj': 'muon',
-        'gate_proj': 'muon',
-        'up_proj': 'muon',
-        'q_proj': 'muon',
-        'k_proj': 'muon', 
-        'v_proj': 'muon',
-        'o_proj': 'muon',
-    })
+    mode: str = 'muon'  # 'muon' or 'moonlight'
+    rms_target: float = 0.2  # Target RMS for moonlight mode
     track_rms: bool = True  # Whether to track update RMS statistics
 
 
 def compute_adaptive_scale(
     grad_shape: torch.Size,
-    param_name: str = '',
     config: Optional[MuonScalingConfig] = None
 ) -> float:
     """
@@ -43,7 +30,6 @@ def compute_adaptive_scale(
     
     Args:
         grad_shape: Shape of the gradient tensor
-        param_name: Name of the parameter (for layer-specific scaling)
         config: Scaling configuration
         
     Returns:
@@ -57,41 +43,14 @@ def compute_adaptive_scale(
         
     m, n = grad_shape[-2], grad_shape[-1]
     
-    # Determine mode based on parameter name if layer patterns are configured
     mode = config.mode
-    # Override MuonScalingConfig.layer_patterns for muon mode
-    # and be consistent with Keller James Muon implementation
     if mode == 'muon':
         # Original Muon scaling: sqrt(fan_out/fan_in)
         return max(1, m / n)**0.5
-
-    # if param_name and config.layer_patterns:
-    #     for pattern, layer_mode in config.layer_patterns.items():
-    #         if pattern in param_name:
-    #             mode = layer_mode
-    #             break
         
     if mode == 'moonlight':
         # Moonlight scaling: fixed coefficient * sqrt(max_dim)
         return config.rms_target * math.sqrt(max(m, n))
-        
-    elif mode == 'hybrid':
-        # Hybrid: use moonlight for heavy down-projections
-        aspect_ratio = m / n
-        if aspect_ratio > config.hybrid_threshold:
-            return config.rms_target * math.sqrt(max(m, n))
-        else:
-            return max(1, m / n)**0.5
-            
-    elif mode == 'adaptive':
-        # Smooth interpolation between muon and moonlight based on aspect ratio
-        aspect_ratio = m / n
-        muon_scale = max(1, m / n)**0.5
-        moonlight_scale = config.rms_target * math.sqrt(max(m, n))
-        
-        # Sigmoid-like interpolation
-        alpha = 1 / (1 + math.exp(-(aspect_ratio - config.hybrid_threshold) / 2))
-        return (1 - alpha) * muon_scale + alpha * moonlight_scale
         
     else:
         raise ValueError(f"Unknown scaling mode: {mode}")
@@ -100,7 +59,6 @@ def compute_adaptive_scale(
 def muon_update_adaptive(
     grad: torch.Tensor,
     momentum: torch.Tensor,
-    param_name: str = '',
     beta: float = 0.95,
     ns_steps: int = 5,
     nesterov: bool = True,
@@ -112,7 +70,6 @@ def muon_update_adaptive(
     Args:
         grad: Gradient tensor
         momentum: Momentum buffer
-        param_name: Parameter name for layer-specific scaling
         beta: Momentum coefficient
         ns_steps: Number of Newton-Schulz iterations
         nesterov: Whether to use Nesterov momentum
@@ -131,7 +88,7 @@ def muon_update_adaptive(
     update = zeropower_via_newtonschulz5(update, steps=ns_steps)
     
     # Apply adaptive scaling
-    scale = compute_adaptive_scale(grad.shape, param_name, scaling_config)
+    scale = compute_adaptive_scale(grad.shape, scaling_config)
     update *= scale
     
     return update
@@ -152,16 +109,16 @@ class SingleDeviceMuonWithAuxAdamAdaptive(torch.optim.Optimizer):
             if group["use_muon"]:
                 group["params"] = sorted(group["params"], key=lambda x: x.size(), reverse=True)
                 # defaults
-                group["lr"] = group.get("lr", 0.02)
-                group["momentum"] = group.get("momentum", 0.95)
-                group["weight_decay"] = group.get("weight_decay", 0)
+                group["lr"] = group.get("lr")#, 0.02)
+                group["momentum"] = group.get("momentum")#, 0.95)
+                group["weight_decay"] = group.get("weight_decay")#, 0)
                 assert set(group.keys()) == set(["params", "lr", "momentum", "weight_decay", "use_muon"])
             else:
                 # defaults for Adam
-                group["lr"] = group.get("lr", 3e-4)
+                group["lr"] = group.get("lr")#, 3e-4)
                 group["betas"] = group.get("betas", (0.9, 0.95))
                 group["eps"] = group.get("eps", 1e-10)
-                group["weight_decay"] = group.get("weight_decay", 0)
+                group["weight_decay"] = group.get("weight_decay")#, 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
                 
         super().__init__(param_groups, dict())
@@ -193,14 +150,10 @@ class SingleDeviceMuonWithAuxAdamAdaptive(torch.optim.Optimizer):
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
                         
-                    # Get parameter name for layer-specific scaling
-                    param_name = self.param_names.get(p, '')
-                    
                     # Adaptive Muon update
                     update = muon_update_adaptive(
                         p.grad,
                         state["momentum_buffer"],
-                        param_name=param_name,
                         beta=group["momentum"],
                         scaling_config=self.scaling_config
                     )
@@ -208,6 +161,7 @@ class SingleDeviceMuonWithAuxAdamAdaptive(torch.optim.Optimizer):
                     # Track RMS if enabled
                     if self.rms_history is not None:
                         rms = (update.norm() / math.sqrt(update.numel())).item()
+                        param_name = self.param_names.get(p, f'param_{id(p)}')
                         if param_name not in self.rms_history:
                             self.rms_history[param_name] = []
                         self.rms_history[param_name].append(group["lr"] * rms)
