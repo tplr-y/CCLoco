@@ -57,7 +57,6 @@ parameters:
     value: 0.2  # Keep default for scalars
   muon_scaling_mode:
     values:
-    - muon
     - moonlight
     - hybrid
     - adaptive
