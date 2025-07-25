@@ -264,6 +264,12 @@ class DistributedLLMTrainer:
             help="Error decay for CCLoco optimizer",
         )
         parser.add_argument(
+            "--error_feedback_alpha",
+            type=float,
+            default=1.0,
+            help="Error feedback alpha for CCLoco optimizer",
+        )
+        parser.add_argument(
             "--top_k", type=int, default=32, help="Top k for CCLoco optimizer"
         )
         parser.add_argument(
@@ -297,6 +303,13 @@ class DistributedLLMTrainer:
             type=int,
             default=6,
             help="Quantization range in standard deviations",
+        )
+        parser.add_argument(
+            "--oned_chunk_strat",
+            type=str,
+            default="rate_1d",
+            choices=["rate_1d", "rate_2d", "none"],
+            help="Compression strategy for 1D tensors in CCLoco optimizer",
         )
 
         # Dataset args
@@ -736,9 +749,11 @@ class DistributedLLMTrainer:
                 momentum=self.config.outer_momentum,
                 weight_decay=self.outer_weight_decay,
                 error_decay=self.config.error_decay,
+                error_feedback_alpha=self.config.error_feedback_alpha,
                 top_k=self.config.top_k,
                 chunk_size=self.config.chunk_size,
                 chunk_strat=self.config.chunk_strat,
+                oned_chunk_strat=self.config.oned_chunk_strat,
                 use_dct=self.config.use_dct,
                 use_sign=self.config.outer_use_sign,
                 use_quantization=self.config.use_quantization,

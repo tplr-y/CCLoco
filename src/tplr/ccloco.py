@@ -194,11 +194,13 @@ class ChunkingTransform:
         chunk_size: int,
         use_dct: bool,
         chunk_strat: Literal["square", "each_row", "each_column"] = "square",
+        oned_chunk_strat: Literal["rate_1d", "rate_2d", "none"] = "rate_1d",
         norm: str = "ortho",
     ):
         self.target_chunk = chunk_size
         self.use_dct = use_dct
         self.chunk_strat = chunk_strat
+        self.oned_chunk_strat = oned_chunk_strat
         self.decode_info: Optional[Tuple[str, torch.Size]] = None
         self.shape_dict = {}
         self.f_dict, self.b_dict = (
@@ -221,8 +223,11 @@ class ChunkingTransform:
                     continue
                 for s in p.shape:
                     if s not in self.shape_dict:
+                        target_chunk = self.target_chunk
+                        if self.oned_chunk_strat == "rate_2d" and len(p.shape) == 1:
+                            target_chunk = self.target_chunk**2
                         # Chunking related
-                        sc = _get_smaller_split(s, self.target_chunk)
+                        sc = _get_smaller_split(s, target_chunk)
                         self.shape_dict[s] = sc
                         # DCT related
                         if self.use_dct and sc not in self.f_dict:
@@ -487,9 +492,11 @@ class CCLoco(torch.optim.SGD):
         params: ParamsT,
         lr: float,
         error_decay: float = 0.999,
+        error_feedback_alpha: float = 1.0,
         top_k: int = 32,
         chunk_size: int = 64,
         chunk_strat: str = "square",
+        oned_chunk_strat: Literal["rate_1d", "rate_2d", "none"] = "rate_1d",
         momentum: float = 0.0,
         weight_decay: float = 0.0,
         use_dct: bool = False,
@@ -503,16 +510,18 @@ class CCLoco(torch.optim.SGD):
         super().__init__(params, lr=lr, momentum=momentum, weight_decay=0.0, **kwargs)
 
         self.error_decay = error_decay
+        self.error_feedback_alpha = error_feedback_alpha
         self.top_k = top_k
         self.chunk_size = chunk_size
         self.chunk_strat = chunk_strat
+        self.oned_chunk_strat = oned_chunk_strat
         self.decoupled_weight_decay = weight_decay
         self.use_dct = use_dct
         self.use_sign = use_sign
         self.process_group = process_group
 
-        self.transform = ChunkingTransform(
-            self.param_groups, chunk_size, use_dct, chunk_strat
+        self.chunking = ChunkingTransform(
+            self.param_groups, chunk_size, use_dct, chunk_strat, oned_chunk_strat
         )
         self.compressor = TopKCompressor(
             use_quantization, quantization_bins, quantization_range
@@ -562,12 +571,21 @@ class CCLoco(torch.optim.SGD):
                 error_buffer.add_(p.grad, alpha=lr)
 
                 # 3. Compress the error buffer to get the values to transmit.
-                tensor_to_compress = self.transform.encode(error_buffer)
+                tensor_to_compress = self.chunking.encode(error_buffer)
 
-                # Adapt K to maintain compression ratio for non-square strategies
+                # Adapt K to maintain compression ratio for different strategies
                 k = self.top_k
-                strategy, _ = self.transform.decode_info
-                if strategy in ["each_row", "each_column"]:
+                strategy, _ = self.chunking.decode_info
+
+                if strategy == "1d":
+                    chunk_len = tensor_to_compress.shape[-1]
+                    if self.oned_chunk_strat == "rate_2d":
+                        k_float = chunk_len * self.top_k / (self.chunk_size**2)
+                        k = int(max(1.0, round(k_float)))
+                    elif self.oned_chunk_strat == "none":
+                        k = chunk_len
+
+                elif strategy in ["each_row", "each_column"]:
                     chunk_len = tensor_to_compress.shape[-1]
                     k_float = chunk_len * self.top_k / (self.chunk_size**2)
                     k = int(max(1.0, round(k_float)))
@@ -580,8 +598,8 @@ class CCLoco(torch.optim.SGD):
                 local_reconstruction = self.compressor.decompress(
                     indices, values, shape, p, local_quant_params
                 )
-                transmitted_gradient = self.transform.decode(local_reconstruction)
-                error_buffer.sub_(transmitted_gradient)
+                transmitted_gradient = self.chunking.decode(local_reconstruction)
+                error_buffer.sub_(transmitted_gradient, alpha=self.error_feedback_alpha)
 
                 # 5. Communicate the sparse gradients (and quantization params) across all workers.
                 gathered_quant_params = (
@@ -603,7 +621,7 @@ class CCLoco(torch.optim.SGD):
                 aggregated_reconstruction = self.compressor.batch_decompress(
                     gathered_indices, gathered_values, shape, p
                 )
-                aggregated_gradient = self.transform.decode(aggregated_reconstruction)
+                aggregated_gradient = self.chunking.decode(aggregated_reconstruction)
 
                 # 7. Set the parameter's gradient to the aggregated result.
                 p.grad.copy_(aggregated_gradient)
