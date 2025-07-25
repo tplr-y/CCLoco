@@ -47,7 +47,6 @@ parameters:
   # Muon-specific hyperparameters
   muon_inner_learning_rate:
     values:
-    - 0.05
     - 0.02  # Original Muon learning rate
     - 0.001  # For testing moonlight claims
   muon_momentum:
