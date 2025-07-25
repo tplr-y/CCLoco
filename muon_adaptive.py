@@ -81,16 +81,16 @@ def compute_adaptive_scale(
         if aspect_ratio > config.hybrid_threshold:
             return config.rms_target * math.sqrt(max(m, n))
         else:
-            return max(1, math.sqrt(m / n))
+            return max(1, m / n)**0.5
             
     elif mode == 'adaptive':
         # Smooth interpolation between muon and moonlight based on aspect ratio
         aspect_ratio = m / n
-        muon_scale = max(1, math.sqrt(m / n))
+        muon_scale = max(1, m / n)**0.5
         moonlight_scale = config.rms_target * math.sqrt(max(m, n))
         
         # Sigmoid-like interpolation
-        alpha = 1 / (1 + math.exp(-(aspect_ratio - 4) / 2))
+        alpha = 1 / (1 + math.exp(-(aspect_ratio - config.hybrid_threshold) / 2))
         return (1 - alpha) * muon_scale + alpha * moonlight_scale
         
     else:
