@@ -771,11 +771,12 @@ class DistributedLLMTrainer:
                 # Create parameter groups for SingleDeviceMuonWithAuxAdam
                 adam_groups = []
                 if head_params:
-                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate))
+                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate, weight_decay=self.config.weight_decay))
                 if embed_params:
-                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate))
+                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate, weight_decay=self.config.weight_decay))
                 if scalar_params:
-                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate))
+                    #TODO validate this, should we apply weight decay to scalars
+                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate, weight_decay=0)) 
                 
                 adam_groups = [dict(**g, betas=(0.9, 0.95), eps=1e-8, use_muon=False) for g in adam_groups]
                 
