@@ -15,7 +15,7 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_ada_muon
+    value: ccloco_muon_v_moonlight
 
   # Data configuration
   shards_path:
@@ -63,8 +63,6 @@ parameters:
   muon_rms_target:
     values: 
     - 0.2  # For moonlight mode only
-    - 0.25
-    - 0.3
   inner_steps:
     values:
     - 15
