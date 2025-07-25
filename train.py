@@ -1157,7 +1157,11 @@ class DistributedLLMTrainer:
                     )
 
                 metrics_dict.update(timer_metrics)
-                metrics_dict.update(muon_rms)
+                if (self.config.inner_optimizer == "muon" and 
+                    self.config.track_muon_rms and 
+                    hasattr(self.inner_optimizer, 'get_rms_stats')
+                ):
+                    metrics_dict.update(muon_rms)
 
                 self.wandb.log(metrics_dict, step=self.global_step)
 
