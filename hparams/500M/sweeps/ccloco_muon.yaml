@@ -35,7 +35,7 @@ parameters:
 
   # Training configuration
   micro_batch_size:
-    value: 24 # -1 to set micro_batch_size to batch_size
+    value: 20 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
