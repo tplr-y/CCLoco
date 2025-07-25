@@ -44,17 +44,21 @@ parameters:
     - 1
   inner_learning_rate:
     values:
-    - 0.02 # Muon typically uses higher LR
-    - 1e-2
+    # - 0.02 # Muon typically uses higher LR
+    - 1e-3 # for moonlight can re-use adam turned hparam
+    # from moonlight paper: "Muon can directly reuse the learning rate and weight decay tuned for AdamW."
   # Muon-specific learning rate scaling
   muon_head_lr_scale:
     values:
-    - 0.5  # Default
+    # - 0.5  # Default
+    - 1.0
   muon_embed_lr_scale:
     values:
-    - 0.5  # Default
+    # - 0.5  # Default
+    - 1.0
   muon_scalar_lr_scale:
-    value: 0.2  # Keep default for scalars
+    # value: 0.2  # Keep default for scalars
+    value: 1.0
   muon_scaling_mode:
     values:
     - moonlight
@@ -74,7 +78,8 @@ parameters:
     value: 500
   weight_decay:
     values: 
-    - 0.01  # Muon uses lower weight decay
+    # - 0.01  # Muon uses lower weight decay
+    - 0.1
 
   # Compression configuration
   error_decay:
