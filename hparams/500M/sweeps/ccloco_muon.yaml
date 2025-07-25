@@ -35,7 +35,7 @@ parameters:
 
   # Training configuration
   micro_batch_size:
-    value: 16 # -1 to set micro_batch_size to batch_size
+    value: 32 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
@@ -45,16 +45,14 @@ parameters:
   inner_learning_rate:
     values:
     - 0.02 # Muon typically uses higher LR
-    - 1e-3
+    - 1e-2
   # Muon-specific learning rate scaling
   muon_head_lr_scale:
     values:
     - 0.5  # Default
-    # - 1.0  # Same as hidden layers
   muon_embed_lr_scale:
     values:
     - 0.5  # Default
-    # - 1.0  # Same as hidden layers
   muon_scalar_lr_scale:
     value: 0.2  # Keep default for scalars
   muon_scaling_mode:
@@ -86,9 +84,3 @@ parameters:
     value: 32
   chunk_size:
     value: 64
-  # quantization_bins:
-  #   value: 256
-  # quantization_range:
-  #   value: 6
-  # use_quantization:
-  #   value: True

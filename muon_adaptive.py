@@ -22,7 +22,7 @@ class MuonScalingConfig:
     # These map to LLaMa linear layer naming, see *_proj here:
     # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
     layer_patterns: Dict[str, str] = field(default_factory=lambda: {
-        'down_proj': 'moonlight',
+        'down_proj': 'muon',
         'gate_proj': 'muon',
         'up_proj': 'muon',
         'q_proj': 'muon',
@@ -63,13 +63,13 @@ def compute_adaptive_scale(
     # and be consistent with Keller James Muon implementation
     if mode == 'muon':
         # Original Muon scaling: sqrt(fan_out/fan_in)
-        return math.sqrt(max(1, (m / n)))
+        return max(1, m / n)**0.5
 
-    if param_name and config.layer_patterns:
-        for pattern, layer_mode in config.layer_patterns.items():
-            if pattern in param_name:
-                mode = layer_mode
-                break
+    # if param_name and config.layer_patterns:
+    #     for pattern, layer_mode in config.layer_patterns.items():
+    #         if pattern in param_name:
+    #             mode = layer_mode
+    #             break
         
     if mode == 'moonlight':
         # Moonlight scaling: fixed coefficient * sqrt(max_dim)
