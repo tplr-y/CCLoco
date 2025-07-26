@@ -50,6 +50,9 @@ parameters:
     #   original adam lr: 0.02*0.05=0.001, 
     #   slightly higher, 1/10th muon: 0.02*0.1=0.002, 
     #   matching adam lr == muon lr:0.02*1=0.02. 
+    # We also want to explore Vanilla Muon's lr for the non-muon groups:
+    #     adam_groups = [dict(params=head_params, lr=0.22), dict(params=embed_params, lr=0.6), dict(params=scalar_params, lr=0.04)]
+    # https://github.com/KellerJordan/modded-nanogpt/blob/master/records/052525_MuonWithAuxAdamExample/b01550f9-03d8-4a9c-86fe-4ab434f1c5e0.txt#L471
     value: 0.02  
   # Muon-specific hyperparameters
   muon_head_lr_scale:
@@ -57,19 +60,22 @@ parameters:
     - 0.05
     - 0.1
     - 1.0
+    - 11.0 # corresponds to adam lr 0.22
   muon_embed_lr_scale:
     values:
     - 0.05
     - 0.1
     - 1.0
+    - 30.0 # corresponds to adam lr 0.6
   muon_scalar_lr_scale:
     values: 
     - 0.2
     - 0.05
+    - 2.0 # corresponds to adam lr 0.04
   muon_inner_learning_rate:
     values:
     - 0.02  # Original Muon learning rate
-    - 0.03
+    - 0.05
   muon_momentum:
     value: 0.95  # Muon momentum
   muon_weight_decay:
