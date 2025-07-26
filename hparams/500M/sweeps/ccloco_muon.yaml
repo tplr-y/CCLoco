@@ -15,7 +15,7 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon_v_moonlight
+    value: ccloco_muon_re_adam_scaling
 
   # Data configuration
   shards_path:
@@ -43,25 +43,43 @@ parameters:
     values:
     - 1
   inner_learning_rate:
-    value: 1e-3  # AdamW learning rate for embedding/head/scalar params
+    # AdamW learning rate for embedding/head/scalar params
+    # The question is how to scale adam w.r.t. muon updates.
+    # Here we match the adam lr with muon, and then scale it down per param group. 
+    # We explore
+    #   original adam lr: 0.02*0.05=0.001, 
+    #   slightly higher, 1/10th muon: 0.02*0.1=0.002, 
+    #   matching adam lr == muon lr:0.02*1=0.02. 
+    value: 0.02  
   # Muon-specific hyperparameters
+  muon_head_lr_scale:
+    values:
+    - 0.05
+    - 0.1
+    - 1.0
+  muon_embed_lr_scale:
+    values:
+    - 0.05
+    - 0.1
+    - 1.0
+  muon_scalar_lr_scale:
+    values: 
+    - 0.2
+    - 0.05
   muon_inner_learning_rate:
     values:
     - 0.02  # Original Muon learning rate
-    - 0.001  # For testing moonlight claims
+    - 0.03
   muon_momentum:
     value: 0.95  # Muon momentum
   muon_weight_decay:
     values:
     - 0.01  # Original Muon weight decay
-    - 0.1  # For testing moonlight claims
+    - 0.001
+    - 0.0
   muon_scaling_mode:
     values:
     - muon
-    - moonlight
-  muon_rms_target:
-    values: 
-    - 0.2  # For moonlight mode only
   inner_steps:
     values:
     - 15
@@ -69,7 +87,7 @@ parameters:
   warmup_steps:
     value: 500
   weight_decay:
-    value: 0.1  # AdamW weight decay for embedding/head/scalar params
+    value: 0.0  # AdamW weight decay for embedding/head/scalar params
 
   # Compression configuration
   error_decay:
