@@ -76,9 +76,6 @@ parameters:
   muon_weight_decay:
     values:
     - 0.01  # Original Muon weight decay
-  muon_scaling_mode:
-    values:
-    - muon
   inner_steps:
     values:
     - 15
