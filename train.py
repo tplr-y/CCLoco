@@ -201,6 +201,8 @@ class DistributedLLMTrainer:
                 "diloco_baseline",
                 "demo_baseline",
                 "demo_diloco",
+                "ccnormal",
+                "topknormal",
                 "topkloco",
                 "ccloco",
                 "custom",
@@ -226,7 +228,7 @@ class DistributedLLMTrainer:
         parser.add_argument(
             "--inner_steps",
             type=int,
-            default=10,
+            default=15,
             help="Local steps before communication (H)",
         )
         parser.add_argument(
@@ -260,7 +262,7 @@ class DistributedLLMTrainer:
         parser.add_argument(
             "--error_decay",
             type=float,
-            default=0.999,
+            default=0.95,
             help="Error decay for CCLoco optimizer",
         )
         parser.add_argument(
@@ -307,7 +309,7 @@ class DistributedLLMTrainer:
         parser.add_argument(
             "--oned_chunk_strat",
             type=str,
-            default="rate_1d",
+            default="rate_2d",
             choices=["rate_1d", "rate_2d", "none"],
             help="Compression strategy for 1D tensors in CCLoco optimizer",
         )
@@ -439,6 +441,35 @@ class DistributedLLMTrainer:
 
             config.top_k = int(chunk_topk * (hidden_size**2) / (chunk_size**2))
             config.chunk_size = hidden_size
+        elif config.strategy == "ccnormal":
+            tplr.logger.info(
+                f"[Strat] Hardcoding inner optimizer to None (simple grad accumulation) and outer optimizer to 'ccloco'."
+            )
+            config.inner_optimizer = None
+            config.outer_optimizer = "ccloco"
+            config.use_dct = False
+            config.outer_use_sign = False
+            config.inner_steps = 1
+        elif config.strategy == "topknormal":
+            tplr.logger.info(
+                f"[Strat] Hardcoding inner optimizer to None (simple grad accumulation) and outer optimizer to 'ccloco' with top-k compression (no chunking)."
+            )
+            config.inner_optimizer = None
+            config.outer_optimizer = "ccloco"
+            config.use_dct = False
+            config.outer_use_sign = False
+            config.inner_steps = 1
+
+            # Find chunk size and topk values for classic topk
+            hparams_file = os.path.expandvars(os.path.expanduser(config.hparams_file))
+            with open(hparams_file, "r") as fp:
+                hparams = json.load(fp)
+            hidden_size = hparams.get("hidden_size")
+            chunk_topk = config.top_k
+            chunk_size = config.chunk_size
+
+            config.top_k = int(chunk_topk * (hidden_size**2) / (chunk_size**2))
+            config.chunk_size = hidden_size
         else:
             if config.strategy != "custom":
                 tplr.logger.warning(
@@ -457,6 +488,7 @@ class DistributedLLMTrainer:
         if config.trace:
             tplr.trace()
 
+        tplr.logger.info(f"Config: {config}")
         return config
 
     def __init__(self):
