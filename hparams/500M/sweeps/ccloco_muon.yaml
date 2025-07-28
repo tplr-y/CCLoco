@@ -43,7 +43,7 @@ parameters:
     values:
     - 1
   inner_learning_rate:
-    # AdamW learning rate for embedding/head/scalar params
+    # Re: AdamW learning rate for embedding/head/scalar params
     # The question is how to scale adam w.r.t. muon updates.
     # Here we match the adam lr with muon, and then scale it down per param group. 
     # We explore
@@ -53,47 +53,41 @@ parameters:
     # We also want to explore Vanilla Muon's lr for the non-muon groups:
     #     adam_groups = [dict(params=head_params, lr=0.22), dict(params=embed_params, lr=0.6), dict(params=scalar_params, lr=0.04)]
     # https://github.com/KellerJordan/modded-nanogpt/blob/master/records/052525_MuonWithAuxAdamExample/b01550f9-03d8-4a9c-86fe-4ab434f1c5e0.txt#L471
-    value: 0.02  
+    values:
+    - 0.02  # Original Muon learning rate
+    - 0.03
   # Muon-specific hyperparameters
   muon_head_lr_scale:
     values:
-    - 0.05
-    - 0.1
+    - 0.5
     - 1.0
     - 11.0 # corresponds to adam lr 0.22
   muon_embed_lr_scale:
     values:
-    - 0.05
-    - 0.1
+    - 0.5
     - 1.0
     - 30.0 # corresponds to adam lr 0.6
   muon_scalar_lr_scale:
     values: 
     - 0.2
-    - 0.05
     - 2.0 # corresponds to adam lr 0.04
-  muon_inner_learning_rate:
-    values:
-    - 0.02  # Original Muon learning rate
-    - 0.05
   muon_momentum:
     value: 0.95  # Muon momentum
   muon_weight_decay:
     values:
     - 0.01  # Original Muon weight decay
-    - 0.001
-    - 0.0
   muon_scaling_mode:
     values:
     - muon
   inner_steps:
     values:
     - 15
-    - 30
   warmup_steps:
     value: 500
   weight_decay:
-    value: 0.0  # AdamW weight decay for embedding/head/scalar params
+    value: 0.0  # AdamW weight decay for embedding/head params
+  outer_nesterov:
+    value: True # align with muon which has this True by default
 
   # Compression configuration
   error_decay:

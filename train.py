@@ -31,10 +31,8 @@ from transformers import (
 
 # Import Muon optimizer not yet part of PyTorch, see
 #   https://github.com/pytorch/pytorch/issues/148819
-#from muon import SingleDeviceMuonWithAuxAdam
-# Using the default muon impl from muon_adaptive allows us to validate
-# v.s. previous runs with the official Keller James impl.
-from muon_adaptive import SingleDeviceMuonWithAuxAdamAdaptive
+# original + added activation RMS tracking
+from muon import SingleDeviceMuonWithAuxAdam
 
 # Local
 import tplr
@@ -244,12 +242,6 @@ class DistributedLLMTrainer:
         )
         ## Muon-specific hyperparameters
         parser.add_argument(
-            "--muon_inner_learning_rate",
-            type=float,
-            default=0.02,
-            help="Learning rate specifically for Muon optimizer (default: 0.02)",
-        )
-        parser.add_argument(
             "--muon_momentum",
             type=float,
             default=0.95,
@@ -260,19 +252,6 @@ class DistributedLLMTrainer:
             type=float,
             default=0.01,
             help="Weight decay for Muon optimizer (default: 0.01)",
-        )
-        parser.add_argument(
-            "--muon_scaling_mode",
-            type=str,
-            default="muon",
-            choices=["muon", "moonlight"],
-            help="Scaling mode for Muon optimizer (only 'muon' and 'moonlight' supported)"
-        )
-        parser.add_argument(
-            "--muon_rms_target",
-            type=float,
-            default=0.25,
-            help="Target RMS for moonlight scaling mode"
         )
         parser.add_argument(
             "--track_muon_rms",
@@ -774,14 +753,14 @@ class DistributedLLMTrainer:
                     # and we're doing layer specific RMS tracking
                     param_to_name[param] = name
 
-                    if param.ndim < 2:
-                        scalar_params.append(param)
+                    if param.ndim >= 2 and "embed" not in name and "lm_head" not in name:
+                        hidden_2d_params.append(param)
                     elif "embed" in name:
                         embed_params.append(param)
-                    elif "lm_head" in name or "output" in name:
+                    elif "lm_head" in name:
                         head_params.append(param)
                     else:
-                        hidden_2d_params.append(param)
+                        scalar_params.append(param)
                 
                 if not embed_params:
                     tplr.logger.exception("The embedding layer must contain the word 'embed' so we can isolate it from Muon")
@@ -793,10 +772,9 @@ class DistributedLLMTrainer:
                 if embed_params:
                     adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate * self.config.muon_embed_lr_scale, weight_decay=self.config.weight_decay))
                 if scalar_params:
-                    #TODO validate this, should we apply weight decay to scalars
-                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate * self.config.muon_scalar_lr_scale, weight_decay=0)) 
+                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate * self.config.muon_scalar_lr_scale, weight_decay=self.config.weight_decay)) 
                 
-                adam_groups = [dict(**g, betas=(0.9, 0.95), eps=1e-10, use_muon=False) for g in adam_groups]
+                adam_groups = [dict(**g, betas=(0.9, 0.95), eps=1e-8, use_muon=False) for g in adam_groups]
                 
                 # Ensure we have at least some parameters for Muon
                 if not hidden_2d_params:
@@ -804,7 +782,7 @@ class DistributedLLMTrainer:
                 
                 muon_group = dict(
                     params=hidden_2d_params, 
-                    lr=self.config.muon_inner_learning_rate,
+                    lr=self.config.inner_learning_rate,
                     momentum=self.config.muon_momentum,
                     weight_decay=self.config.muon_weight_decay,
                     use_muon=True
@@ -812,26 +790,15 @@ class DistributedLLMTrainer:
                 
                 param_groups = adam_groups + [muon_group]
                 
-                # Create MuonScalingConfig for the optimizer
-                from muon_adaptive import MuonScalingConfig
-                scaling_config = MuonScalingConfig(
-                    mode=self.config.muon_scaling_mode,
-                    rms_target=self.config.muon_rms_target,
-                    track_rms=self.config.track_muon_rms
-                )
-                
-                self.inner_optimizer = SingleDeviceMuonWithAuxAdamAdaptive(param_groups, scaling_config=scaling_config)
+                self.inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups, track_rms=self.config.track_muon_rms)
 
                 self.inner_optimizer.set_param_names(param_to_name)
                 
                 if self.global_rank == 0:
                     tplr.logger.info(
-                        f"Using Muon as inner optimizer with muon_scaling_mode={self.config.muon_scaling_mode}, "\
-                        f"lr={self.config.muon_inner_learning_rate}, momentum={self.config.muon_momentum}, "\
+                        f"Using Muon as inner optimizer with lr={self.config.inner_learning_rate}, momentum={self.config.muon_momentum}, "\
                         f"weight_decay={self.config.muon_weight_decay}"
                     )
-                    if self.config.muon_scaling_mode == 'moonlight':
-                        tplr.logger.info(f"  - muon_rms_target: {self.config.muon_rms_target}")
                     
                     tplr.logger.info(f"  - Hidden matrix params: {len(hidden_2d_params)} (Muon)")
                     tplr.logger.info(f"  - Embedding params: {len(embed_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_embed_lr_scale})")

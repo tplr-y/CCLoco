@@ -229,7 +229,10 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     """
     Non-distributed variant of MuonWithAuxAdam.
     """
-    def __init__(self, param_groups):
+    def __init__(self, param_groups, track_rms=True):
+        # Store parameter names for layer-specific RMS tracking
+        self.param_names = {}
+        
         for group in param_groups:
             assert "use_muon" in group
             if group["use_muon"]:
@@ -246,6 +249,16 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 group["weight_decay"] = group.get("weight_decay", 0)
                 assert set(group.keys()) == set(["params", "lr", "betas", "eps", "weight_decay", "use_muon"])
         super().__init__(param_groups, dict())
+
+        # Initialize scaling configuration
+        self.track_rms = track_rms
+        
+        # RMS tracking for analysis (optional)
+        self.rms_history = {} if self.track_rms else None
+        
+    def set_param_names(self, param_to_name: Dict[torch.nn.Parameter, str]):
+        """Set parameter names for layer-specific RMS tracking."""
+        self.param_names = param_to_name
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -265,6 +278,15 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
                     update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                    
+                    # Track RMS if enabled
+                    if self.rms_history is not None:
+                        rms = (update.norm() / math.sqrt(update.numel())).item()
+                        param_name = self.param_names.get(p, f'param_{id(p)}')
+                        if param_name not in self.rms_history:
+                            self.rms_history[param_name] = []
+                        self.rms_history[param_name].append(group["lr"] * rms)
+
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update.reshape(p.shape), alpha=-group["lr"])
             else:
@@ -284,3 +306,36 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     p.add_(update, alpha=-group["lr"])
 
         return loss
+        
+    def get_rms_stats(self) -> Dict[str, Dict[str, float]]:
+        """Get RMS statistics by layer type."""
+        if self.rms_history is None:
+            return {}
+            
+        import numpy as np
+        stats = {}
+        
+        # Group by layer type
+        layer_types = set()
+        for param_name in self.rms_history:
+            for pattern in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 
+                          'up_proj', 'gate_proj', 'down_proj']:
+                if pattern in param_name:
+                    layer_types.add(pattern)
+                    break
+                    
+        for layer_type in layer_types:
+            values = []
+            for param_name, rms_list in self.rms_history.items():
+                if layer_type in param_name:
+                    values.extend(rms_list[-100:])  # Last 100 values
+                    
+            if values:
+                stats[layer_type] = {
+                    'mean': np.mean(values),
+                    'std': np.std(values),
+                    'min': np.min(values),
+                    'max': np.max(values),
+                }
+                
+        return stats
