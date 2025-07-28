@@ -15,7 +15,7 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon_re_adam_scaling
+    value: ccloco_adam_rel_muon_lr_nstrv
 
   # Data configuration
   shards_path:
