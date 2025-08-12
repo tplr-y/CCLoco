@@ -36,10 +36,11 @@ import torch.fft
 import torch.distributed as dist
 from einops import rearrange
 
-# ---------- Type Aliases ---------- #
+# Type Aliases
 ParamsT: TypeAlias = Union[Iterable[torch.Tensor], Iterable[dict[str, Any]]]
 
 
+# https://github.com/zh217/torch-dct
 def _dct_fft_impl(v):
     return torch.view_as_real(torch.fft.fft(v, dim=1))
 

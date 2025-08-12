@@ -1,0 +1,83 @@
+name: ccloco_muon_sweep
+project:  ccloco
+method: grid
+program: train.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8
+  - ${program} 
+  - ${args_no_boolean_flags}
+
+parameters:
+  # Run configuration
+  strategy:
+    value: ccloco_muon
+  run_name:
+    value: ccloco_muon
+    
+  # Data configuration
+  shards_path:
+    value: $DATA_DIR/dclm_10B_tokenized
+  token_budget:
+    value: 9940500480 # [effective_bs=2**22 * H=15 * iterations=158]
+  sequence_length:
+    value: 2048
+
+  # Model configuration
+  hparams_file:
+    value: hparams/1B/1B_model_hparams.json
+  use_compile:
+    value: True
+
+  # Training configuration
+  micro_batch_size:
+    value: 8 # -1 to set micro_batch_size to batch_size
+  batch_size:
+    values: 
+    - 256
+  outer_learning_rate:
+    values:
+    - 0.9
+    - 0.7
+    - 1
+  inner_learning_rate:
+    values:
+    - 0.02  # Muon typically uses higher LR
+    - 0.01
+    - 0.005
+    - 8e-4
+  # Muon-specific learning rate scaling
+  muon_head_lr_scale:
+    values:
+    - 0.5  # Default
+    - 1.0  # Same as hidden layers
+  muon_embed_lr_scale:
+    values:
+    - 0.5  # Default
+    - 1.0  # Same as hidden layers
+  muon_scalar_lr_scale:
+    value: 0.2  # Keep default for scalars
+  inner_steps:
+    values:
+    - 15
+  warmup_steps:
+    value: 500
+  weight_decay:
+    values: 
+    - 0.01  # Muon uses lower weight decay
+    - 0.1
+
+  # Compression configuration (same as ccloco.yaml)
+  error_decay:
+    value: 0.999
+  top_k:
+    value: 32
+  chunk_size:
+    value: 64
+  quantization_bins:
+    value: 256
+  quantization_range:
+    value: 6
+  use_quantization:
+    value: True

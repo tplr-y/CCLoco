@@ -62,6 +62,14 @@ Then, run any of the predefined experiments using the corresponding sweep file. 
 bash ./run_sweep.sh hparams/1B/sweeps/ccloco.yaml
 ```
 
+### CCLoco + MuonWithAuxAdam Inner Optimizer
+
+The [Muon optimizer](https://github.com/KellerJordan/Muon/tree/master) will be used for local optimization steps within each data-parallel group, while CCLoco handles the global aggregation.
+
+```bash
+bash ./run_sweep.sh hparams/1B/sweeps/ccloco.yaml
+```
+
 ### Baselines
 
 **DiLoCo Baseline**: Baseline DiLoCo with Nesterov outer optimizer
@@ -82,4 +90,16 @@ bash ./run_sweep.sh hparams/1B/sweeps/demo_baseline.yaml
 **AdamW Baseline**: Standard DDP with AdamW
 ```bash
 bash ./run_sweep.sh hparams/1B/sweeps/adam_baseline.yaml
+```
+
+## Citation
+If you find **CCLoco** useful in your work, please consider citing our work. You can read more about CCLoco in our [blog post](https://templarresearch.substack.com/p/ccloco-scaling-up-top-k-error-feedback).
+```bibtex
+@misc{sarfi2025ccloco,
+      title={CCLoco: Scaling Up Top-K Error Feedback with Local Optimizers}, 
+      author={Sarfi, A. et al.},
+      howpublished = {\url{https://github.com/tplr-ai/CCLoco}},
+      year={2025},
+      note={Full report coming soon}
+}
 ```

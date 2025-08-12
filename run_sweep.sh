@@ -2,6 +2,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "Starting ....."
+
 CONFIG=$1
 
 # 1) create the sweep and capture the ID that wandb prints

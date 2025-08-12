@@ -1,0 +1,95 @@
+name: ccloco_muon_sweep
+project:  ccloco500M
+method: grid
+program: train.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8
+  - ${program} 
+  - ${args_no_boolean_flags}
+  - --track_muon_rms
+
+parameters:
+  # Run configuration
+  strategy:
+    value: ccloco_muon
+  run_name:
+    value: ccloco_adam_rel_muon_lr_nstrv
+
+  # Data configuration
+  shards_path:
+    value: $DATA_DIR/dclm_tokenized
+  token_budget:
+    value: 10255073280 # [effective_bs=2**22 * H=15 * iterations=163]
+  shard_token_size:
+    value: 1073741824 # 1Gi
+  sequence_length:
+    value: 2048
+
+  # Model configuration
+  hparams_file:
+    value: hparams/500M/500M_model_hparams.json
+  use_compile:
+    value: True
+
+  # Training configuration
+  micro_batch_size:
+    value: 20 # -1 to set micro_batch_size to batch_size
+  batch_size:
+    values: 
+    - 256
+  outer_learning_rate:
+    values:
+    - 1
+  inner_learning_rate:
+    # Re: AdamW learning rate for embedding/head/scalar params
+    # The question is how to scale adam w.r.t. muon updates.
+    # Here we match the adam lr with muon, and then scale it down per param group. 
+    # We explore
+    #   original adam lr: 0.02*0.05=0.001, 
+    #   slightly higher, 1/10th muon: 0.02*0.1=0.002, 
+    #   matching adam lr == muon lr:0.02*1=0.02. 
+    # We also want to explore Vanilla Muon's lr for the non-muon groups:
+    #     adam_groups = [dict(params=head_params, lr=0.22), dict(params=embed_params, lr=0.6), dict(params=scalar_params, lr=0.04)]
+    # https://github.com/KellerJordan/modded-nanogpt/blob/master/records/052525_MuonWithAuxAdamExample/b01550f9-03d8-4a9c-86fe-4ab434f1c5e0.txt#L471
+    values:
+    - 0.02  # Original Muon learning rate
+    - 0.03
+  # Muon-specific hyperparameters
+  muon_head_lr_scale:
+    values:
+    - 0.5
+    - 1.0
+    - 11.0 # corresponds to adam lr 0.22
+  muon_embed_lr_scale:
+    values:
+    - 0.5
+    - 1.0
+    - 30.0 # corresponds to adam lr 0.6
+  muon_scalar_lr_scale:
+    values: 
+    - 0.2
+    - 2.0 # corresponds to adam lr 0.04
+  muon_momentum:
+    value: 0.95  # Muon momentum
+  muon_weight_decay:
+    values:
+    - 0.01  # Original Muon weight decay
+  inner_steps:
+    values:
+    - 15
+  warmup_steps:
+    value: 500
+  weight_decay:
+    value: 0.0  # AdamW weight decay for embedding/head params
+  outer_nesterov:
+    value: True # align with muon which has this True by default
+
+  # Compression configuration
+  error_decay:
+    value: 0.95
+  top_k:
+    value: 32
+  chunk_size:
+    value: 64

@@ -29,6 +29,11 @@ from transformers import (
     LlamaForCausalLM,
 )
 
+# Import Muon optimizer not yet part of PyTorch, see
+#   https://github.com/pytorch/pytorch/issues/148819
+# original + added activation RMS tracking
+from muon import SingleDeviceMuonWithAuxAdam
+
 # Local
 import tplr
 
@@ -205,6 +210,7 @@ class DistributedLLMTrainer:
                 "topknormal",
                 "topkloco",
                 "ccloco",
+                "ccloco_muon",
                 "custom",
             ],
             help="Training strategy to use",
@@ -213,7 +219,7 @@ class DistributedLLMTrainer:
             "--inner_optimizer",
             type=str,
             default=None,
-            choices=["adamw"],
+            choices=["adamw", "muon"],
             help="inner optimizer to use. None means simple gradient accumulation",
         )
         parser.add_argument(
@@ -236,6 +242,42 @@ class DistributedLLMTrainer:
             type=float,
             default=6e-4,
             help="Learning rate for inner optimizer",
+        )
+        ## Muon-specific hyperparameters
+        parser.add_argument(
+            "--muon_momentum",
+            type=float,
+            default=0.95,
+            help="Momentum coefficient for Muon optimizer (default: 0.95)",
+        )
+        parser.add_argument(
+            "--muon_weight_decay",
+            type=float,
+            default=0.01,
+            help="Weight decay for Muon optimizer (default: 0.01)",
+        )
+        parser.add_argument(
+            "--track_muon_rms",
+            action="store_true",
+            help="Track RMS statistics for Muon updates"
+        )
+        parser.add_argument(
+            "--muon_head_lr_scale",
+            type=float,
+            default=0.5,
+            help="Learning rate scaling factor for head parameters when using Muon (default: 0.5)",
+        )
+        parser.add_argument(
+            "--muon_embed_lr_scale",
+            type=float,
+            default=0.5,
+            help="Learning rate scaling factor for embedding parameters when using Muon (default: 0.5)",
+        )
+        parser.add_argument(
+            "--muon_scalar_lr_scale",
+            type=float,
+            default=0.2,
+            help="Learning rate scaling factor for scalar parameters when using Muon (default: 0.2)",
         )
 
         ## Outer optimizer
@@ -327,7 +369,7 @@ class DistributedLLMTrainer:
             default="~/datasets/edu_fineweb_score2_10B_tokenized_llama2",
             help="Path to the dataset shards.",
         )
-        parser.add_argument(
+        parser.add_argument(    
             "--shard_token_size",
             type=int,
             default=1024**3,
@@ -419,6 +461,14 @@ class DistributedLLMTrainer:
                 f"[Strat] Hardcoding inner optimizer to 'adamw' and outer optimizers to 'ccloco'."
             )
             config.inner_optimizer = "adamw"
+            config.outer_optimizer = "ccloco"
+            config.use_dct = False
+            config.outer_use_sign = False
+        elif config.strategy == "ccloco_muon":
+            tplr.logger.info(
+                f"[Strat] Hardcoding inner optimizer to 'muon' and outer optimizers to 'ccloco'."
+            )
+            config.inner_optimizer = "muon"
             config.outer_optimizer = "ccloco"
             config.use_dct = False
             config.outer_use_sign = False
@@ -765,6 +815,74 @@ class DistributedLLMTrainer:
                     tplr.logger.info(
                         f"Using AdamW as inner optimizer with lr={self.config.inner_learning_rate} and weight_decay={self.config.weight_decay}"
                     )
+            elif self.config.inner_optimizer.lower() == "muon":
+                # Separate parameters for Muon (2D matrices) and Adam (embeddings, scalars)
+                hidden_2d_params = []
+                embed_params = []
+                scalar_params = []
+                head_params = []
+                param_to_name = {}
+                
+                for name, param in self.model.named_parameters():
+                    if not param.requires_grad:
+                        continue
+
+                    # we do this because the original muon impl doesn't use named_parameters
+                    # and we're doing layer specific RMS tracking
+                    param_to_name[param] = name
+
+                    if param.ndim >= 2 and "embed" not in name and "lm_head" not in name:
+                        hidden_2d_params.append(param)
+                    elif "embed" in name:
+                        embed_params.append(param)
+                    elif "lm_head" in name:
+                        head_params.append(param)
+                    else:
+                        scalar_params.append(param)
+                
+                if not embed_params:
+                    tplr.logger.exception("The embedding layer must contain the word 'embed' so we can isolate it from Muon")
+                
+                # Create parameter groups for SingleDeviceMuonWithAuxAdam
+                adam_groups = []
+                if head_params:
+                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate * self.config.muon_head_lr_scale, weight_decay=self.config.weight_decay))
+                if embed_params:
+                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate * self.config.muon_embed_lr_scale, weight_decay=self.config.weight_decay))
+                if scalar_params:
+                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate * self.config.muon_scalar_lr_scale, weight_decay=self.config.weight_decay)) 
+                
+                adam_groups = [dict(**g, betas=(0.9, 0.95), eps=1e-8, use_muon=False) for g in adam_groups]
+                
+                # Ensure we have at least some parameters for Muon
+                if not hidden_2d_params:
+                    tplr.logger.exception("No hidden 2-dim parameters found for Muon optimizer.")
+                
+                muon_group = dict(
+                    params=hidden_2d_params, 
+                    lr=self.config.inner_learning_rate,
+                    momentum=self.config.muon_momentum,
+                    weight_decay=self.config.muon_weight_decay,
+                    use_muon=True
+                )
+                
+                param_groups = adam_groups + [muon_group]
+                
+                self.inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups, track_rms=self.config.track_muon_rms)
+
+                self.inner_optimizer.set_param_names(param_to_name)
+                
+                if self.global_rank == 0:
+                    tplr.logger.info(
+                        f"Using Muon as inner optimizer with lr={self.config.inner_learning_rate}, momentum={self.config.muon_momentum}, "\
+                        f"weight_decay={self.config.muon_weight_decay}"
+                    )
+                    
+                    tplr.logger.info(f"  - Hidden matrix params: {len(hidden_2d_params)} (Muon)")
+                    tplr.logger.info(f"  - Embedding params: {len(embed_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_embed_lr_scale})")
+                    tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_scalar_lr_scale})")
+                    tplr.logger.info(f"  - Head params: {len(head_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_head_lr_scale})")
+                    tplr.logger.info(f"  - Track RMS: {self.config.track_muon_rms}")
             else:
                 raise NotImplementedError(
                     f"Unknown inner optimizer: {self.config.inner_optimizer}"
@@ -985,6 +1103,17 @@ class DistributedLLMTrainer:
                     )
 
             if self.global_rank == 0:
+                # Muon RMS Tracking
+                if (self.config.inner_optimizer == "muon" and 
+                    self.config.track_muon_rms and 
+                    hasattr(self.inner_optimizer, 'get_rms_stats')
+                ):
+                    rms_stats = self.inner_optimizer.get_rms_stats()
+                    muon_rms = {}
+                    for layer_type, stats in rms_stats.items():
+                        for stat_name, value in stats.items():
+                            muon_rms[f"muon_rms/{layer_type}/{stat_name}"] = value
+
                 # Calculate tokens per second
                 all_stats = Timer.summarize(
                     logger=self.timing_logger if self.config.debug else None
@@ -1023,6 +1152,10 @@ class DistributedLLMTrainer:
                 )
 
                 # Log gradient metrics
+                params_without_grad = sum(1 for p in self.model.parameters() if p.grad is None)
+                if params_without_grad > 0:
+                    tplr.logger.warning(f"Found {params_without_grad} parameters without gradients")
+                
                 grad_norms = [
                     p.grad.norm().item()
                     for p in self.model.parameters()
@@ -1090,6 +1223,11 @@ class DistributedLLMTrainer:
                     )
 
                 metrics_dict.update(timer_metrics)
+                if (self.config.inner_optimizer == "muon" and 
+                    self.config.track_muon_rms and 
+                    hasattr(self.inner_optimizer, 'get_rms_stats')
+                ):
+                    metrics_dict.update(muon_rms)
 
                 self.wandb.log(metrics_dict, step=self.global_step)
 
