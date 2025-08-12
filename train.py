@@ -259,22 +259,10 @@ class DistributedLLMTrainer:
             help="Track RMS statistics for Muon updates"
         )
         parser.add_argument(
-            "--muon_head_lr_scale",
+            "--muon_adam_lr_scale",
             type=float,
             default=0.5,
-            help="Learning rate scaling factor for head parameters when using Muon (default: 0.5)",
-        )
-        parser.add_argument(
-            "--muon_embed_lr_scale",
-            type=float,
-            default=0.5,
-            help="Learning rate scaling factor for embedding parameters when using Muon (default: 0.5)",
-        )
-        parser.add_argument(
-            "--muon_scalar_lr_scale",
-            type=float,
-            default=0.2,
-            help="Learning rate scaling factor for scalar parameters when using Muon (default: 0.2)",
+            help="Learning rate scaling factor for non-Muon parameters when using Muon (default: 0.5)",
         )
 
         ## Outer optimizer
@@ -768,11 +756,11 @@ class DistributedLLMTrainer:
                 # Create parameter groups for SingleDeviceMuonWithAuxAdam
                 adam_groups = []
                 if head_params:
-                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate * self.config.muon_head_lr_scale, weight_decay=self.config.weight_decay))
+                    adam_groups.append(dict(params=head_params, lr=self.config.inner_learning_rate * self.config.muon_adam_lr_scale, weight_decay=self.config.weight_decay))
                 if embed_params:
-                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate * self.config.muon_embed_lr_scale, weight_decay=self.config.weight_decay))
+                    adam_groups.append(dict(params=embed_params, lr=self.config.inner_learning_rate * self.config.muon_adam_lr_scale, weight_decay=self.config.weight_decay))
                 if scalar_params:
-                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate * self.config.muon_scalar_lr_scale, weight_decay=self.config.weight_decay)) 
+                    adam_groups.append(dict(params=scalar_params, lr=self.config.inner_learning_rate * self.config.muon_adam_lr_scale, weight_decay=self.config.weight_decay)) 
                 
                 adam_groups = [dict(**g, betas=(0.9, 0.95), eps=1e-8, use_muon=False) for g in adam_groups]
                 
@@ -801,9 +789,9 @@ class DistributedLLMTrainer:
                     )
                     
                     tplr.logger.info(f"  - Hidden matrix params: {len(hidden_2d_params)} (Muon)")
-                    tplr.logger.info(f"  - Embedding params: {len(embed_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_embed_lr_scale})")
-                    tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_scalar_lr_scale})")
-                    tplr.logger.info(f"  - Head params: {len(head_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_head_lr_scale})")
+                    tplr.logger.info(f"  - Embedding params: {len(embed_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_adam_lr_scale})")
+                    tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_adam_lr_scale})")
+                    tplr.logger.info(f"  - Head params: {len(head_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_adam_lr_scale})")
                     tplr.logger.info(f"  - Track RMS: {self.config.track_muon_rms}")
             else:
                 raise NotImplementedError(
