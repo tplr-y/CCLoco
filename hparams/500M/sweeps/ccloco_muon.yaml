@@ -15,7 +15,7 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon_h_30_lr_02_and_01
+    value: ccloco_muon_h_30_lr_001_and_00006
 
   # Data configuration
   shards_path:
@@ -48,11 +48,11 @@ parameters:
     # Here we match the adam lr with muon, and then scale it down per param group. 
     # We use the same scale for all adam params because adam is adaptive per-param anyways
     values:
-    - 0.02  # Original Muon learning rate
-    - 0.01
+    # - 0.02  # Original Muon learning rate
+    # - 0.01
   # will uncomment in subsequent commit, to be able to run in parallel, and track in wandb.. meanwhile will check if there is another way?
-    # - 0.001 
-    # - 0.0006
+    - 0.001 
+    - 0.0006
   # Muon-specific hyperparameters
   muon_adam_lr_scale:
     values:
