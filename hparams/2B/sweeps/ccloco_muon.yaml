@@ -1,4 +1,4 @@
-name: ccloco_muon_h_30_sweep
+name: ccloco_muon_2B_sweep
 project:  ccloco2B
 method: grid
 program: train.py
@@ -15,15 +15,22 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon_2B_h_30
+    value: ccloco_muon_2B_lr_steps
 
   # Data configuration
   shards_path:
-    value: $DATA_DIR/dclm_tokenized
+    value: $DATA_DIR/dclm_48B_tokenized
   token_budget:
-    value: 10255073280 # [effective_bs=2**22 * H=15 * iterations=163]
+    value: 41020293120
+    # we used 10255073280 for the 500M size, chinchilla scaling suggests 4x for 2B
+    #  token_budget := effective_bs * H * iterations
+    #               =      2**22    * 30 * ___ <--degree of freedom when we set other params.
+    #  note, effective_bz := mbs * workers * seqlen 
+    #                      = 256 *    8    *  2048 = 2**22
+    #  thus H=30 num_steps = 41020293120/8/2048/256/30 = 326
+    #       H=60 num_steps = 41020293120/8/2048/256/60 = 163
   shard_token_size:
-    value: 1073741824 # 1Gi
+    value: 1073741824 # 1Gi (gibabytes i.e. 1Gi=2**30 bytes, slightly larger than 1GB which is 10**9 bytes)
   sequence_length:
     value: 2048
 
@@ -50,10 +57,9 @@ parameters:
     values:
     - 0.02  # Original Muon learning rate
     - 0.01
-  # will uncomment in subsequent commit, to be able to run in parallel, and track in wandb.. meanwhile will check if there is another way?
-    - 0.008
     - 0.001
-    - 0.025
+    # - 0.008
+    # - 0.025
   # Muon-specific hyperparameters
   muon_adam_lr_scale:
     values:
@@ -65,9 +71,12 @@ parameters:
   muon_weight_decay:
     values:
     - 0.01  # Original Muon weight decay
+    # - 0.005 # reduce slightly due to larger model size vs 500M
+    # Yang et al. (2022) Tensor Programs V explicitly states weight decay is NOT transferable across scales (Table 1) - it affects the "width-dependent scale of weight norms at convergence.
   inner_steps:
     values:
     - 30
+    - 60
   warmup_steps:
     value: 500
   weight_decay:
