@@ -15,13 +15,14 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon_2B_lr_steps
+    value: ccloco_muon_2B_k_sweep_10B_tok
 
   # Data configuration
   shards_path:
     value: $DATA_DIR/dclm_48B_tokenized
   token_budget:
-    value: 41020293120
+    value: 10255073280 # intentionally training 10B total tokens only
+    # value: 41020293120
     # we used 10255073280 for the 500M size, chinchilla scaling suggests 4x for 2B
     #  token_budget := effective_bs * H * iterations
     #               =      2**22    * 30 * ___ <--degree of freedom when we set other params.
@@ -55,16 +56,17 @@ parameters:
     # Here we match the adam lr with muon, and then scale it down per param group. 
     # We use the same scale for all adam params because adam is adaptive per-param anyways
     values:
-    - 0.02  # Original Muon learning rate
+    # - 0.02  # Original Muon learning rate
     - 0.01
-    - 0.001
+    # - 0.001
     # - 0.008
     # - 0.025
   # Muon-specific hyperparameters
   muon_adam_lr_scale:
     values:
-    # - 0.05
-    - 0.5
+    # - 0.1
+    - 0.2
+    # - 0.5
     # - 1.0
   muon_momentum:
     value: 0.95  # Muon momentum
@@ -76,7 +78,7 @@ parameters:
   inner_steps:
     values:
     - 30
-    - 60
+    # - 60
   warmup_steps:
     value: 500
   weight_decay:
@@ -89,6 +91,9 @@ parameters:
   error_decay:
     value: 0.95
   top_k:
-    value: 32
+    values: 
+    - 32
+    - 128
+    - 256
   chunk_size:
     value: 64
