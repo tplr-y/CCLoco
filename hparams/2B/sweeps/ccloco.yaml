@@ -1,0 +1,74 @@
+name: ccloco_adamw_baseline
+project:  ccloco2B
+method: grid
+program: train.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8
+  - ${program} 
+  - ${args_no_boolean_flags}
+
+parameters:
+  # Run configuration
+  strategy:
+    value: ccloco
+  run_name:
+    value: ccloco_adamw_baseline
+
+  # Data configuration
+  shards_path:
+    value: $DATA_DIR/dclm_48B_tokenized
+  token_budget:
+    value: 10255073280 # intentionally training 10B total tokens only
+    # value: 41020293120
+    # we used 10255073280 for the 500M size, chinchilla scaling suggests 4x for 2B
+    #  token_budget := effective_bs * H * iterations
+    #               =      2**22    * 30 * ___ <--degree of freedom when we set other params.
+    #  note, effective_bz := mbs * workers * seqlen 
+    #                      = 256 *    8    *  2048 = 2**22
+    #  thus H=30 num_steps = 41020293120/8/2048/256/30 = 326
+    #       H=60 num_steps = 41020293120/8/2048/256/60 = 163
+  shard_token_size:
+    value: 1073741824 # 1Gi (gibabytes i.e. 1Gi=2**30 bytes, slightly larger than 1GB which is 10**9 bytes)
+  sequence_length:
+    value: 2048
+
+  # Model configuration
+  hparams_file:
+    value: hparams/2B/2B_model_hparams.json
+  use_compile:
+    value: True
+
+  # Training configuration
+  micro_batch_size:
+    value: 8 # -1 to set micro_batch_size to batch_size
+  batch_size:
+    values: 
+    - 256
+  outer_learning_rate:
+    values:
+    - 1
+  inner_learning_rate:
+    values:
+    - 0.001
+  inner_steps:
+    values:
+    - 30
+  warmup_steps:
+    value: 500
+  weight_decay:
+    value: 0.1
+  outer_nesterov:
+    value: False
+
+  # Compression configuration
+  error_decay:
+    value: 0.95
+  top_k:
+    values: 
+    - 32
+    # - 128
+    # - 256
+  chunk_size:
+    value: 64
