@@ -231,9 +231,15 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
     """
     Non-distributed variant of MuonWithAuxAdam.
     """
-    def __init__(self, param_groups, track_rms=True):
+    def __init__(self, param_groups, track_rms=True, use_qk_clip=False, muonclip_threshold=100.0):
         # Store parameter names for layer-specific RMS tracking
         self.param_names = {}
+        
+        self.use_qk_clip = use_qk_clip
+        self.muonclip_threshold = muonclip_threshold
+
+        if self.use_qk_clip:
+            print("SingleDeviceMuonWithAuxAdam: Using QK clip with threshold: ", self.muonclip_threshold)
         
         for group in param_groups:
             assert "use_muon" in group
@@ -257,7 +263,14 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
         
         # RMS tracking for analysis (optional)
         self.rms_history = {} if self.track_rms else None
-        
+    
+    def set_model_reference(self, model):
+        """Collect attention modules for QK-Clip."""        
+        self.attn_modules = []
+        for layer in model.model.layers:
+            if hasattr(layer, 'self_attn'):
+                self.attn_modules.append(layer.self_attn)
+
     def set_param_names(self, param_to_name: Dict[torch.nn.Parameter, str]):
         """Set parameter names for layer-specific RMS tracking."""
         self.param_names = param_to_name
@@ -306,6 +319,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                                          state["step"], group["betas"], group["eps"])
                     p.mul_(1 - group["lr"] * group["weight_decay"])
                     p.add_(update, alpha=-group["lr"])
+        if self.use_qk_clip:
+            self._apply_qk_clip()
 
         return loss
         
@@ -341,3 +356,130 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                 }
                 
         return stats
+
+    def _apply_qk_clip(self):
+        """Apply QK-Clip to Q and K projection weights if needed."""
+        if not self.use_qk_clip or not hasattr(self, 'attn_modules'):
+            return
+        
+        for attn_module in self.attn_modules:
+            if not hasattr(attn_module, '_qk_clip_max_logits'):
+                continue
+                
+            max_logits = attn_module._qk_clip_max_logits
+            
+            # Early exit if no clipping needed
+            if (max_logits <= self.muonclip_threshold).all():
+                continue
+            
+            # Vectorized scale computation
+            mask = max_logits > self.muonclip_threshold
+            scales = torch.ones_like(max_logits)
+            scales[mask] = torch.sqrt(self.muonclip_threshold / max_logits[mask])
+            
+            # Get dimensions
+            num_heads = len(max_logits)
+            head_dim = attn_module.q_proj.weight.shape[0] // num_heads
+            
+            # Reshape, scale, reshape back
+            q_weight = attn_module.q_proj.weight.view(num_heads, head_dim, -1)
+            k_weight = attn_module.k_proj.weight.view(num_heads, head_dim, -1)
+            
+            # Apply scaling using broadcasting
+            q_weight.mul_(scales.view(num_heads, 1, 1))
+            k_weight.mul_(scales.view(num_heads, 1, 1))
+            
+            # Update weights
+            attn_module.q_proj.weight.data = q_weight.view(attn_module.q_proj.weight.shape)
+            attn_module.k_proj.weight.data = k_weight.view(attn_module.k_proj.weight.shape)
+
+
+def monkey_patch_muon_clip(model, log):
+    """
+    Patch a Llama model to track max attention logits for MuonClip optimizer.
+
+    eager_attention_forward is defined in the following:
+
+    https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L171
+
+    We leave the attention computation unchanged.
+
+    The only modification is the if statement that captures the max logits 
+    per head before softmax, and stores them in the model's _qk_clip_max_logits dictionary. 
+    This is only done if the  _track_qk_clip attribute is set to True. 
+    The memory overhead is negligible. For a 2B model with 24 attention layers and 
+    20 attention heads per layer that is 480 float32 values in total.
+    
+    Args:
+        model: A LlamaForCausalLM model instance
+    """
+    import torch
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    from transformers.models.llama.modeling_llama import repeat_kv
+    
+    @torch.compile
+    def muonclip_attention_forward(
+        module,
+        query,
+        key,
+        value,
+        attention_mask,
+        scaling,
+        dropout=0.0,
+        **kwargs,
+    ):
+        """Standard attention that tracks max logits for MuonClip."""
+        # Store original dtype and upcast if needed
+        original_dtype = query.dtype
+        if original_dtype in (torch.float16, torch.bfloat16):
+            query = query.to(torch.float32)
+            key = key.to(torch.float32)
+            value = value.to(torch.float32)
+        
+        key_states = repeat_kv(key, module.num_key_value_groups)
+        value_states = repeat_kv(value, module.num_key_value_groups)
+        
+        is_causal = query.shape[2] > 1 and attention_mask is None and getattr(module, "is_causal", True)
+        attn_bias = torch.zeros(query.size(-2), key.size(-2), dtype=query.dtype, device=query.device)
+        if is_causal:
+            temp_mask = torch.ones(query.size(-2), key.size(-2), dtype=torch.bool, device=query.device).tril(diagonal=0)
+            attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+            attn_bias.to(query.dtype)
+
+        attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+        attn_weights += attn_bias
+
+        # # Store max logits per head before softmax after causal mask is applied
+        if hasattr(module, '_track_qk_clip'):
+            # attn_weights shape: [batch, num_heads, seq_len, seq_len]
+            max_per_head = attn_weights.flatten(2).max(dim=-1).values.max(dim=0).values
+            # Keep running maximum across forward passes (for gradient accumulation)
+            if hasattr(module, '_qk_clip_max_logits'):
+                module._qk_clip_max_logits = torch.maximum(module._qk_clip_max_logits, max_per_head.detach())
+            else:
+                module._qk_clip_max_logits = max_per_head.detach()
+        
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
+        
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = torch.nn.functional.dropout(attn_weights, p=dropout, training=True)
+        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        
+        # Downcast back to original dtype if we upcasted
+        if original_dtype in (torch.float16, torch.bfloat16):
+            attn_output = attn_output.to(original_dtype)
+        
+        return attn_output, attn_weights
+    
+    # Mark attention modules for tracking
+    for layer in model.model.layers:
+        layer.self_attn._track_qk_clip = True
+    
+    log.info('registering monkeypatched attention; current attention implementation: %s', model.config._attn_implementation)
+    # Register custom attention
+    ALL_ATTENTION_FUNCTIONS.register("monkeypatched_eager_with_causal_mask_and_logit_tracking", muonclip_attention_forward)
+    model.config._attn_implementation = "monkeypatched_eager_with_causal_mask_and_logit_tracking"
+    log.info('now using monkeypatched attention %s', model.config._attn_implementation)

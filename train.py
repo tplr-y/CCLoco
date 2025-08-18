@@ -29,6 +29,8 @@ from transformers import (
     LlamaForCausalLM,
 )
 
+from transformers.models.llama.modeling_llama import eager_attention_forward
+
 # Import Muon optimizer not yet part of PyTorch, see
 #   https://github.com/pytorch/pytorch/issues/148819
 # original + added activation RMS tracking
@@ -36,7 +38,6 @@ from muon import SingleDeviceMuonWithAuxAdam
 
 # Local
 import tplr
-
 
 class Timer:
     """Context manager for timing code blocks."""
@@ -123,7 +124,7 @@ class Timer:
 
         return result
 
-
+# 
 def dict_parser_type(value):
     """Helper function to parse a JSON string into a dict for argparse."""
     try:
@@ -208,6 +209,7 @@ class DistributedLLMTrainer:
                 "demo_diloco",
                 "ccloco",
                 "ccloco_muon",
+                "ccloco_muon_clip",
                 "custom",
             ],
             help="Training strategy to use",
@@ -263,6 +265,22 @@ class DistributedLLMTrainer:
             type=float,
             default=0.5,
             help="Learning rate scaling factor for non-Muon parameters when using Muon (default: 0.5)",
+        )
+        parser.add_argument(
+            "--track_qk_clip",
+            action="store_true",
+            help="Track QK-Clip statistics for Muon updates (uses inefficient eager attn with 20% slowdown)"
+        )
+        parser.add_argument(
+            "--use_qk_clip",
+            action="store_true",
+            help="Enable QK-Clip for MuonClip optimizer"
+        )
+        parser.add_argument(
+            "--muonclip_threshold",
+            type=float,
+            default=100.0,
+            help="Maximum attention logit threshold for QK-Clip (default: 100.0)"
         )
 
         ## Outer optimizer
@@ -423,7 +441,7 @@ class DistributedLLMTrainer:
             config.outer_optimizer = "ccloco"
             config.use_dct = False
             config.outer_use_sign = False
-        elif config.strategy == "ccloco_muon":
+        elif config.strategy == "ccloco_muon" or config.strategy == "ccloco_muon_clip":
             tplr.logger.info(
                 f"[Strat] Hardcoding inner optimizer to 'muon' and outer optimizers to 'ccloco'."
             )
@@ -539,6 +557,11 @@ class DistributedLLMTrainer:
                 tplr.logger.info(
                     f"→ Optimization: Using torch.compile for model execution"
                 )
+            actual_model = self.model.module if hasattr(self.model, "module") else self.model
+            tplr.logger.info(
+                f"→ attn_implementation: {actual_model.config._attn_implementation}"
+            )
+            tplr.logger.info(f"→ Model in [training/eval] mode:{self.model.training}")
 
             tplr.logger.info("=" * 80 + "\n")
 
@@ -611,6 +634,15 @@ class DistributedLLMTrainer:
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
         self.model = LlamaForCausalLM(model_config)
 
+        if self.config.strategy == "ccloco_muon_clip" or self.config.track_qk_clip:
+            from muon import monkey_patch_muon_clip
+            tplr.logger.info("🐒 Monkey patching LLaMa Attention to "
+               "transformers.models.llama.modeling_llama.eager_attention_forward"
+               " (+ causal masking which is missing from their impl but mysteriously somehow applied, "
+               "see: https://github.com/huggingface/transformers/issues/40362), but with added attention logit capture.")
+            monkey_patch_muon_clip(self.model, log=tplr.logger)
+            tplr.logger.info("🐒 🐒 🐒 Done monkey patching! 🐒🐒🐒")
+        
         self.hparams = SimpleNamespace(
             model_config=model_config, tokenizer=self.tokenizer
         )
@@ -633,6 +665,8 @@ class DistributedLLMTrainer:
         if self.config.use_compile:
             self.model = torch.compile(self.model, dynamic=True)
 
+        tplr.logger.info(f"After compile, using attention_impl: {self.model.config._attn_implementation}")
+
         if self.world_size > 1:
             self.model = DDP(
                 self.model,
@@ -640,7 +674,7 @@ class DistributedLLMTrainer:
                 output_device=self.local_rank,
                 find_unused_parameters=False,
             )
-
+        
     def _initialize_dataloader(self):
         """Initialize the data loader."""
         if self.global_rank == 0:
@@ -725,7 +759,7 @@ class DistributedLLMTrainer:
                     tplr.logger.info(
                         f"Using AdamW as inner optimizer with lr={self.config.inner_learning_rate} and weight_decay={self.config.weight_decay}"
                     )
-            elif self.config.inner_optimizer.lower() == "muon":
+            elif self.config.inner_optimizer.lower() == "muon" or self.config.inner_optimizer.lower() == "muon_clip":
                 # Separate parameters for Muon (2D matrices) and Adam (embeddings, scalars)
                 hidden_2d_params = []
                 embed_params = []
@@ -778,7 +812,15 @@ class DistributedLLMTrainer:
                 
                 param_groups = adam_groups + [muon_group]
                 
-                self.inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups, track_rms=self.config.track_muon_rms)
+                self.inner_optimizer = SingleDeviceMuonWithAuxAdam(
+                    param_groups, 
+                    track_rms=self.config.track_muon_rms,
+                    use_qk_clip=self.config.use_qk_clip,
+                    muonclip_threshold=self.config.muonclip_threshold
+                )
+                # muon optimizer instance needs a reference to the model modules, in order to do the weight rescaling as needed
+                if self.config.use_qk_clip and hasattr(self.inner_optimizer, 'set_model_reference'):
+                    self.inner_optimizer.set_model_reference(self.model.module if hasattr(self.model, "module") else self.model)
 
                 self.inner_optimizer.set_param_names(param_to_name)
                 
@@ -793,6 +835,8 @@ class DistributedLLMTrainer:
                     tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_adam_lr_scale})")
                     tplr.logger.info(f"  - Head params: {len(head_params)} (Adam, lr={self.config.inner_learning_rate * self.config.muon_adam_lr_scale})")
                     tplr.logger.info(f"  - Track RMS: {self.config.track_muon_rms}")
+                    tplr.logger.info(f"  - Use QK-Clip: {self.config.use_qk_clip}")
+                    tplr.logger.info(f"  - QK-Clip threshold: {self.config.muonclip_threshold}")
             else:
                 raise NotImplementedError(
                     f"Unknown inner optimizer: {self.config.inner_optimizer}"
@@ -1135,6 +1179,47 @@ class DistributedLLMTrainer:
                     hasattr(self.inner_optimizer, 'get_rms_stats')
                 ):
                     metrics_dict.update(muon_rms)
+
+                # Add logging for QK-Clip activation (in the wandb metrics section, around line 1150)
+                if self.config.strategy == "ccloco_muon_clip" or self.config.track_qk_clip:
+                    total_heads_clipped = 0
+                    actual_model = self.model.module if hasattr(self.model, "module") else self.model
+    
+                    tplr.logger.info(f"QK-Clip per-layer stats...")
+                    # Log per-layer statistics
+                    for layer_idx, layer in enumerate(actual_model.model.layers):
+                        if hasattr(layer.self_attn, '_qk_clip_max_logits'):
+                            max_logits = layer.self_attn._qk_clip_max_logits
+                            heads_clipped = (max_logits > self.config.muonclip_threshold).sum().item()
+                            
+                            # Per-layer metrics
+                            metrics_dict[f"muonclip/layer_{layer_idx}/max_logit"] = max_logits.max().item()
+                            metrics_dict[f"muonclip/layer_{layer_idx}/heads_clipped"] = heads_clipped
+                            
+                            total_heads_clipped += heads_clipped
+                            
+                    # Global metrics
+                    tplr.logger.info(f"QK-Clip Global Metrics...")
+                    all_max_logits = []
+                    for layer in actual_model.model.layers:
+                        if hasattr(layer.self_attn, '_qk_clip_max_logits'):
+                            all_max_logits.append(layer.self_attn._qk_clip_max_logits.max().item())
+                    
+                    if all_max_logits:
+                        min_logit = min(all_max_logits)
+                        max_logit = max(all_max_logits)
+                        mean_logit = sum(all_max_logits) / len(all_max_logits)
+                        std_logit = torch.tensor(all_max_logits).std().item()
+                    
+                        metrics_dict["muonclip/global_max_logit"] = max_logit
+                        metrics_dict["muonclip/global_min_logit"] = min_logit
+                        metrics_dict["muonclip/global_mean_logit"] = mean_logit
+                        metrics_dict["muonclip/global_std_logit"] = std_logit
+                        metrics_dict["muonclip/total_heads_clipped"] = total_heads_clipped
+                        
+                        tplr.logger.info(f"[rank 0] QK-Clip total heads clipped: {int(total_heads_clipped)}, "
+                                         f"global logit max: {max_logit:.3f}, min: {min_logit:.3f}, "
+                                         f"mean: {mean_logit:.3f}, std: {std_logit:.3f}")                
 
                 self.wandb.log(metrics_dict, step=self.global_step)
 
