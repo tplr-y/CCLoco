@@ -15,7 +15,7 @@ parameters:
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon_2B_k_sweep_10B_tok
+    value: ccloco_muon_2B_h_240
 
   # Data configuration
   shards_path:
@@ -77,7 +77,7 @@ parameters:
     # Yang et al. (2022) Tensor Programs V explicitly states weight decay is NOT transferable across scales (Table 1) - it affects the "width-dependent scale of weight norms at convergence.
   inner_steps:
     values:
-    - 30
+    - 240
     # - 60
   warmup_steps:
     value: 500
@@ -92,8 +92,8 @@ parameters:
     value: 0.95
   top_k:
     values: 
-    - 32
-    - 128
+    # - 32
+    # - 128
     - 256
   chunk_size:
     value: 64
