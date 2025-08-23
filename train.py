@@ -279,8 +279,26 @@ class DistributedLLMTrainer:
         parser.add_argument(
             "--muonclip_threshold",
             type=float,
-            default=100.0,
-            help="Maximum attention logit threshold for QK-Clip (default: 100.0)"
+            default=None,
+            help="Maximum attention logit threshold for QK-Clip (default: None)"
+        )
+        
+        ## Inner step logging
+        parser.add_argument(
+            "--log_inner_steps",
+            action="store_true",
+            help="Log loss per inner step per worker"
+        )
+        parser.add_argument(
+            "--inner_steps_per_log",
+            type=int,
+            default=1,
+            help="Log every N inner steps"
+        )
+        parser.add_argument(
+            "--track_gradient_norms",
+            action="store_true",
+            help="Track gradient norms per inner step"
         )
 
         ## Outer optimizer
@@ -922,16 +940,54 @@ class DistributedLLMTrainer:
 
     def _setup_wandb_and_logging(self):
         """Set up WandB and timing loggers."""
+        # All ranks initialize wandb in shared mode
         if self.global_rank == 0:
+            # Primary node creates the run
             self.wandb = wandb.init(
                 project=self.config.project,
                 name=f"{self.config.run_name}" if self.config.run_name else "runner",
                 config=vars(self.config),
                 group="loco",
                 job_type="loco_training",
+                settings=wandb.Settings(
+                    x_label=f"rank_{self.global_rank}",
+                    mode="shared",
+                    x_primary=True,
+                )
             )
+            run_id = self.wandb.id
+            # Broadcast run ID to all other ranks
+            run_id_list = [run_id]
         else:
-            self.wandb = None
+            run_id_list = [None]
+        
+        # Broadcast the run ID from rank 0 to all ranks
+        if self.world_size > 1:
+            dist.broadcast_object_list(run_id_list, src=0)
+        
+        # Non-primary ranks join the same run
+        if self.global_rank != 0:
+            self.wandb = wandb.init(
+                project=self.config.project,
+                id=run_id_list[0],
+                settings=wandb.Settings(
+                    x_label=f"rank_{self.global_rank}",
+                    mode="shared",
+                    x_primary=False,
+                    x_update_finish_state=False,  # Only primary should mark run as finished
+                )
+            )
+
+        if self.wandb is not None:
+            # Define metric schemas with custom x-axes
+            wandb.define_metric("global_step")
+            wandb.define_metric("global_inner_step")
+            
+            # Inner step metrics use global_inner_step as x-axis
+            wandb.define_metric("inner_steps/*", step_metric="global_inner_step")
+            
+            # All other metrics use global_step as x-axis
+            wandb.define_metric("*", step_metric="global_step")
 
         self.timing_logger = None
         if self.config.debug:
@@ -1052,6 +1108,26 @@ class DistributedLLMTrainer:
                     self.strategy.outer_step(
                         self.model, self.outer_optimizer, self.scheduler
                     )
+
+            # Log inner step losses and gradient norms for each worker (not just rank 0)
+            if self.config.log_inner_steps and "inner_step_losses" in metrics:
+                for inner_step_data in metrics["inner_step_losses"]:
+                    step_num = inner_step_data['step']
+                    # Create a global inner step counter for x-axis
+                    global_inner_step = self.global_step * self.config.inner_steps + step_num
+                    
+                    worker_metrics = {
+                        f"inner_steps/worker_{self.global_rank}/loss": inner_step_data['loss'],
+                        f"inner_steps/worker_{self.global_rank}/accumulated_loss": inner_step_data['accumulated_loss'],
+                        f"inner_steps/worker_{self.global_rank}/outer_step": self.global_step,
+                    }
+                    
+                    # Add gradient norm if available for this inner step
+                    if self.config.track_gradient_norms and "gradient_norms" in metrics and step_num < len(metrics["gradient_norms"]):
+                        worker_metrics[f"inner_steps/worker_{self.global_rank}/gradient_norm"] = metrics["gradient_norms"][step_num]
+                    
+                    # Log with inner step as the x-axis
+                    self.wandb.log(worker_metrics | {"global_inner_step": global_inner_step})
 
             if self.global_rank == 0:
                 # Muon RMS Tracking
@@ -1179,6 +1255,7 @@ class DistributedLLMTrainer:
                     hasattr(self.inner_optimizer, 'get_rms_stats')
                 ):
                     metrics_dict.update(muon_rms)
+                
 
                 # Add logging for QK-Clip activation (in the wandb metrics section, around line 1150)
                 if self.config.strategy == "ccloco_muon_clip" or self.config.track_qk_clip:
@@ -1190,9 +1267,14 @@ class DistributedLLMTrainer:
                     for layer_idx, layer in enumerate(actual_model.model.layers):
                         if hasattr(layer.self_attn, '_qk_clip_max_logits'):
                             max_logits = layer.self_attn._qk_clip_max_logits
-                            heads_clipped = (max_logits > self.config.muonclip_threshold).sum().item()
+                            if self.config.use_qk_clip:
+                                heads_clipped = (max_logits > self.config.muonclip_threshold).sum().item()
+                            else:
+                                heads_clipped = 0
                             
                             # Per-layer metrics
+                            metrics_dict[f"muonclip/layer_{layer_idx}/mean_logit"] = sum(max_logits) / len(max_logits)
+                            metrics_dict[f"muonclip/layer_{layer_idx}/min_logit"] = max_logits.max().item()
                             metrics_dict[f"muonclip/layer_{layer_idx}/max_logit"] = max_logits.max().item()
                             metrics_dict[f"muonclip/layer_{layer_idx}/heads_clipped"] = heads_clipped
                             
@@ -1221,7 +1303,7 @@ class DistributedLLMTrainer:
                                          f"global logit max: {max_logit:.3f}, min: {min_logit:.3f}, "
                                          f"mean: {mean_logit:.3f}, std: {std_logit:.3f}")                
 
-                self.wandb.log(metrics_dict, step=self.global_step)
+                self.wandb.log(metrics_dict | {"global_step": self.global_step})
 
                 # Update total tokens processed
                 self.total_tokens_processed += batch_tokens
@@ -1328,7 +1410,8 @@ class DistributedLLMTrainer:
         if self.world_size > 1:
             destroy_process_group()
 
-        if self.wandb is not None:
+        # Only primary rank should finish the wandb run
+        if self.wandb is not None and self.global_rank == 0:
             self.wandb.finish()
 
         # Close timing logger

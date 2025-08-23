@@ -10,14 +10,16 @@ command:
   - ${args_no_boolean_flags}
   - --track_muon_rms
   - --track_qk_clip
-  - --use_qk_clip
+  - --use_qk_clip 
+  - --log_inner_steps
+  - --inner_steps_per_log=1
 
 parameters:
   # Run configuration
   strategy:
     value: ccloco_muon_clip
   run_name:
-    value: ccloco_muon_clip_lr_clip_threshold_sweep_adamlrscale02
+    value: ccloco_muon_clip5_thresh30
 
   # Data configuration
   shards_path:
@@ -45,9 +47,7 @@ parameters:
 
   muonclip_threshold:
     values:
-    - 10.0
     - 30.0
-    # - 100.0
 
   # Training configuration
   micro_batch_size:
@@ -60,36 +60,30 @@ parameters:
     - 1
   inner_learning_rate:
     values:
-    - 0.01
-    - 0.02  # Original Muon learning rate
-    - 0.03
-    # - 0.001
-    # - 0.008
+    - 0.02
+    - 0.001
+    - 0.0008
   # Muon-specific hyperparameters
   muon_adam_lr_scale:
     values:
-    # - 0.1
-    # - 0.2
-    - 0.2
-    # - 1.0
+    - 0.5
   muon_momentum:
     value: 0.95  # Muon momentum
   muon_weight_decay:
     values:
-    - 0.01  # Original Muon weight decay
-    # - 0.005 # reduce slightly due to larger model size vs 500M
-    # Yang et al. (2022) Tensor Programs V explicitly states weight decay is NOT transferable across scales (Table 1) - it affects the "width-dependent scale of weight norms at convergence.
+    - 0.01  # Original muon weight decay 
+    - 0.1 
   inner_steps:
     values:
     - 30
-    # - 60
   warmup_steps:
-    value: 500
+    value: 800
+  # AdamW weight decay for embedding/head params
   weight_decay:
     values: 
-    - 0.1  # AdamW weight decay for embedding/head params
+    - 0.1  
   outer_nesterov:
-    value: False # later can explore aligning with muon which has this True by default, for now, we will not
+    value: False
 
   # Compression configuration
   error_decay:
@@ -97,7 +91,5 @@ parameters:
   top_k:
     values: 
     - 32
-    # - 128
-    # - 256
   chunk_size:
     value: 64

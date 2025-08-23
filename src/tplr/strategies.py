@@ -106,6 +106,8 @@ class Diloco(InnerOuterStrategy):
     def inner_step(self, model, loader, inner_optimizer, inner_scheduler):
         total_loss, batch_tokens, batch_count = 0, 0, 0
         loss_after_gather = 0.0
+        inner_step_losses = []
+        gradient_norms = []
 
         self.params_offloaded = self._get_offloaded_param(model)
 
@@ -142,10 +144,24 @@ class Diloco(InnerOuterStrategy):
                 if accum_batch_size >= self.config.batch_size:
                     if inner_step_count == 0:
                         loss_after_gather = total_loss
+                    
+                    # Track gradient norm before clipping if enabled
+                    if self.config.track_gradient_norms:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf'))
+                        gradient_norms.append(grad_norm.item())
+                    
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     inner_optimizer.step()
                     inner_scheduler.step()
                     inner_optimizer.zero_grad()
+                    
+                    # Track loss per inner step if enabled
+                    if self.config.log_inner_steps and inner_step_count % self.config.inner_steps_per_log == 0:
+                        inner_step_losses.append({
+                            'step': inner_step_count,
+                            'loss': outputs.loss.item(),
+                            'accumulated_loss': total_loss / (batch_count if batch_count > 0 else 1)
+                        })
 
                     if self.global_rank == 0 and inner_step_count % 5 == 0:
                         tplr.logger.info(
@@ -158,12 +174,20 @@ class Diloco(InnerOuterStrategy):
                     if inner_step_count >= self.config.inner_steps:
                         break
 
-        return {
+        metrics = {
             "total_loss": total_loss / inner_step_count,
             "loss_after_gather": loss_after_gather,
             "batch_count": batch_count,
             "batch_tokens": batch_tokens,
         }
+        
+        if self.config.log_inner_steps and inner_step_losses:
+            metrics["inner_step_losses"] = inner_step_losses
+        
+        if self.config.track_gradient_norms and gradient_norms:
+            metrics["gradient_norms"] = gradient_norms
+        
+        return metrics
 
     def outer_step(self, model, optimizer, scheduler=None):
         if self.params_offloaded is None:

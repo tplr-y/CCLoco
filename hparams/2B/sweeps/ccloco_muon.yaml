@@ -9,13 +9,16 @@ command:
   - ${program} 
   - ${args_no_boolean_flags}
   - --track_muon_rms
+  - --track_qk_clip
+  - --log_inner_steps
+  - --inner_steps_per_log=1
 
 parameters:
   # Run configuration
   strategy:
     value: ccloco_muon
   run_name:
-    value: ccloco_muon_2B_k_sweep_10B_tok
+    value: ccloco_muon_noclip5
 
   # Data configuration
   shards_path:
@@ -39,11 +42,11 @@ parameters:
   hparams_file:
     value: hparams/2B/2B_model_hparams.json
   use_compile:
-    value: True
+    value: False
 
   # Training configuration
   micro_batch_size:
-    value: 8 # -1 to set micro_batch_size to batch_size
+    value: 4 # -1 to set micro_batch_size to batch_size
   batch_size:
     values: 
     - 256
@@ -51,41 +54,31 @@ parameters:
     values:
     - 1
   inner_learning_rate:
-    # Re: AdamW learning rate for embedding/head/scalar params
-    # The question is how to scale adam w.r.t. muon updates.
-    # Here we match the adam lr with muon, and then scale it down per param group. 
-    # We use the same scale for all adam params because adam is adaptive per-param anyways
     values:
-    # - 0.02  # Original Muon learning rate
-    - 0.01
-    # - 0.001
-    # - 0.008
-    # - 0.025
+    - 0.02
+    - 0.001
+    - 0.0008
   # Muon-specific hyperparameters
   muon_adam_lr_scale:
     values:
-    # - 0.1
-    - 0.2
-    # - 0.5
-    # - 1.0
+    - 0.5
   muon_momentum:
     value: 0.95  # Muon momentum
   muon_weight_decay:
     values:
-    - 0.01  # Original Muon weight decay
-    # - 0.005 # reduce slightly due to larger model size vs 500M
-    # Yang et al. (2022) Tensor Programs V explicitly states weight decay is NOT transferable across scales (Table 1) - it affects the "width-dependent scale of weight norms at convergence.
+    - 0.01  # Original muon weight decay  
+    - 0.1
   inner_steps:
     values:
     - 30
-    # - 60
   warmup_steps:
-    value: 500
+    value: 800
+  # AdamW weight decay for embedding/head params
   weight_decay:
     values: 
-    - 0.1  # AdamW weight decay for embedding/head params
+    - 0.1  
   outer_nesterov:
-    value: False # later can explore aligning with muon which has this True by default, for now, we will not
+    value: False
 
   # Compression configuration
   error_decay:
@@ -93,7 +86,5 @@ parameters:
   top_k:
     values: 
     - 32
-    - 128
-    - 256
   chunk_size:
     value: 64

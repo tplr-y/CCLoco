@@ -417,7 +417,6 @@ def monkey_patch_muon_clip(model, log):
     from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
     from transformers.models.llama.modeling_llama import repeat_kv
     
-    @torch.compile
     def muonclip_attention_forward(
         module,
         query,
@@ -429,12 +428,6 @@ def monkey_patch_muon_clip(model, log):
         **kwargs,
     ):
         """Standard attention that tracks max logits for MuonClip."""
-        # Store original dtype and upcast if needed
-        original_dtype = query.dtype
-        if original_dtype in (torch.float16, torch.bfloat16):
-            query = query.to(torch.float32)
-            key = key.to(torch.float32)
-            value = value.to(torch.float32)
         
         key_states = repeat_kv(key, module.num_key_value_groups)
         value_states = repeat_kv(value, module.num_key_value_groups)
@@ -451,8 +444,11 @@ def monkey_patch_muon_clip(model, log):
 
         # # Store max logits per head before softmax after causal mask is applied
         if hasattr(module, '_track_qk_clip'):
+            # More efficient max computation without flatten
             # attn_weights shape: [batch, num_heads, seq_len, seq_len]
-            max_per_head = attn_weights.flatten(2).max(dim=-1).values.max(dim=0).values
+            batch_size, num_heads, seq_len, _ = attn_weights.shape
+            # Reshape and compute max in one operation
+            max_per_head = attn_weights.view(batch_size, num_heads, -1).amax(dim=(0, 2))
             # Keep running maximum across forward passes (for gradient accumulation)
             if hasattr(module, '_qk_clip_max_logits'):
                 module._qk_clip_max_logits = torch.maximum(module._qk_clip_max_logits, max_per_head.detach())
@@ -467,11 +463,7 @@ def monkey_patch_muon_clip(model, log):
         attn_weights = torch.nn.functional.dropout(attn_weights, p=dropout, training=True)
         attn_output = torch.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose(1, 2).contiguous()
-        
-        # Downcast back to original dtype if we upcasted
-        if original_dtype in (torch.float16, torch.bfloat16):
-            attn_output = attn_output.to(original_dtype)
-        
+
         return attn_output, attn_weights
     
     # Mark attention modules for tracking
