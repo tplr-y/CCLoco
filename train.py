@@ -408,6 +408,11 @@ class DistributedLLMTrainer:
             default=None,
             help="Path to checkpoint file to resume training from",
         )
+        parser.add_argument(
+            "--activation_checkpointing",
+            action="store_true",
+            help="Enable activation checkpointing",
+        )
 
         # Timing args
         parser.add_argument(
@@ -664,6 +669,9 @@ class DistributedLLMTrainer:
         self.hparams = SimpleNamespace(
             model_config=model_config, tokenizer=self.tokenizer
         )
+
+        if self.config.activation_checkpointing:
+            self.model.gradient_checkpointing_enable()
 
         if self.config.debug and self.global_rank == 0:
             total = sum(p.numel() for p in self.model.parameters())
