@@ -1,0 +1,73 @@
+name: ccloco_muon
+project:  ccloco150M
+method: grid
+program: train.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=7
+  - ${program} 
+  - ${args_no_boolean_flags}
+  - --track_muon_rms
+  - --log_inner_steps
+  - --inner_steps_per_log=1
+
+parameters:
+  # Run configuration
+  strategy:
+    value: ccloco_muon
+  run_name:
+    value: ccloco_muon
+
+  # Data configuration
+  shards_path:
+    value: $DATA_DIR/dclm_24B_tokenized
+  token_budget:
+    value: 10255073280 # [effective_bs=2**22 * H=15 * iterations=163]
+  shard_token_size:
+    value: 1073741824 # 1Gi
+  sequence_length:
+    value: 2048
+
+  # Model configuration
+  hparams_file:
+    value: hparams/150M/150M_model_hparams.json
+  use_compile:
+    value: True
+
+  # Training configuration
+  micro_batch_size:
+    value: 32 # -1 to set micro_batch_size to batch_size
+  batch_size:
+    values: 
+    - 128
+  outer_learning_rate:
+    values:
+    - 1
+  inner_learning_rate:
+    values:
+    - 0.02  # Original Muon learning rate
+    - 0.01
+  # Muon-specific hyperparameters
+  muon_adam_lr_scale:
+    value: 0.5
+  muon_momentum:
+    value: 0.95  # Muon momentum
+  muon_weight_decay:
+    value: 0.01  # Original Muon weight decay
+  inner_steps:
+    value: 30
+  warmup_steps:
+    value: 500
+  weight_decay:
+    value: 0.1  # AdamW weight decay for embedding/head params
+  outer_nesterov:
+    value: False # later can explore aligning with muon which has this True by default, for now, we will not
+
+  # Compression configuration
+  error_decay:
+    value: 0.95
+  top_k:
+    value: 32
+  chunk_size:
+    value: 64
